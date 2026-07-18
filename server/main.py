@@ -1,4 +1,5 @@
 import hmac
+import json
 import os
 import secrets
 import sqlite3
@@ -45,14 +46,21 @@ def init_db():
             " user_id INTEGER NOT NULL REFERENCES users(id),"
             " PRIMARY KEY (group_id, user_id))"
         )
+        # Append-only per-group event log. `id` is a global monotonic sequence
+        # that doubles as the sync cursor / group version. The server stores
+        # payloads opaquely and never computes on them — clients fold the log.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS expenses ("
+            "CREATE TABLE IF NOT EXISTS events ("
             " id INTEGER PRIMARY KEY,"
             " group_id INTEGER NOT NULL REFERENCES groups(id),"
-            " description TEXT NOT NULL,"
-            " amount_cents INTEGER NOT NULL,"
-            " paid_by INTEGER NOT NULL REFERENCES users(id),"
+            " event_id TEXT UNIQUE NOT NULL,"
+            " type TEXT NOT NULL,"
+            " payload TEXT NOT NULL,"
+            " author INTEGER NOT NULL REFERENCES users(id),"
             " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS events_group_id ON events (group_id, id)"
         )
 
 
@@ -73,10 +81,10 @@ class JoinGroup(BaseModel):
     code: str
 
 
-class ExpenseCreate(BaseModel):
-    description: str
-    amount_cents: int
-    paid_by: int | None = None
+class EventIn(BaseModel):
+    event_id: str
+    type: str
+    payload: dict = {}
 
 
 app = FastAPI()
@@ -174,8 +182,11 @@ def require_member(conn, group_id: int, user_id: int):
 
 
 def split_equally(amount_cents: int, member_ids: list[int]) -> dict[int, int]:
-    """Split an amount into whole cents, distributing the remainder cents to the
-    lowest member ids deterministically so shares always sum to the total."""
+    """Reference split: whole cents, remainder distributed to the lowest member
+    ids deterministically so shares always sum to the total. The client mirrors
+    this exactly (pwa/src/ledger.js) — they must agree, so this stays the
+    canonical spec covered by golden vectors even though the server, being a
+    blind relay, does not compute balances itself."""
     n = len(member_ids)
     base, remainder = divmod(amount_cents, n)
     return {
@@ -184,27 +195,39 @@ def split_equally(amount_cents: int, member_ids: list[int]) -> dict[int, int]:
     }
 
 
-def compute_balances(members, expenses):
-    # Simple v1: every expense is split equally among the group's *current*
-    # members. Per-expense split modes and membership snapshots are deferred.
-    member_ids = [m["id"] for m in members]
-    paid = {uid: 0 for uid in member_ids}
-    owed = {uid: 0 for uid in member_ids}
-    for e in expenses:
-        for uid, share in split_equally(e["amount_cents"], member_ids).items():
-            owed[uid] += share
-        if e["paid_by"] in paid:
-            paid[e["paid_by"]] += e["amount_cents"]
-    return [
-        {
-            "user_id": m["id"],
-            "username": m["username"],
-            "paid_cents": paid[m["id"]],
-            "owed_cents": owed[m["id"]],
-            "net_cents": paid[m["id"]] - owed[m["id"]],
-        }
-        for m in members
-    ]
+def group_version(conn, group_id: int) -> int:
+    return conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM events WHERE group_id = ?", (group_id,)
+    ).fetchone()[0]
+
+
+def append_event(conn, group_id, event_id, type_, payload, author) -> int:
+    cur = conn.execute(
+        "INSERT INTO events (group_id, event_id, type, payload, author)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (group_id, event_id, type_, json.dumps(payload), author),
+    )
+    return cur.lastrowid
+
+
+def add_member(conn, group_id, user):
+    """Record a membership and log a member.added event so clients folding the
+    ledger see the member set. Returns True if newly added."""
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO memberships (group_id, user_id) VALUES (?, ?)",
+        (group_id, user["id"]),
+    )
+    if not cur.rowcount:
+        return False
+    append_event(
+        conn,
+        group_id,
+        secrets.token_hex(16),
+        "member.added",
+        {"user_id": user["id"], "username": user["username"]},
+        user["id"],
+    )
+    return True
 
 
 @app.post("/api/groups")
@@ -220,10 +243,7 @@ def create_group(body: GroupCreate, request: Request):
             (name, code, user["id"]),
         )
         group_id = cur.lastrowid
-        conn.execute(
-            "INSERT INTO memberships (group_id, user_id) VALUES (?, ?)",
-            (group_id, user["id"]),
-        )
+        add_member(conn, group_id, user)
     return {"id": group_id, "name": name, "code": code}
 
 
@@ -233,7 +253,10 @@ def list_groups(request: Request):
     with db() as conn:
         rows = conn.execute(
             "SELECT g.id, g.name, g.code,"
-            " (SELECT COUNT(*) FROM memberships m2 WHERE m2.group_id = g.id) AS members"
+            " (SELECT COUNT(*) FROM memberships m2 WHERE m2.group_id = g.id)"
+            "   AS members,"
+            " (SELECT COALESCE(MAX(e.id), 0) FROM events e WHERE e.group_id = g.id)"
+            "   AS version"
             " FROM groups g JOIN memberships m ON m.group_id = g.id"
             " WHERE m.user_id = ? ORDER BY g.id DESC",
             (user["id"],),
@@ -250,10 +273,7 @@ def join_group(body: JoinGroup, request: Request):
         ).fetchone()
         if not group:
             raise HTTPException(404, "no group with that code")
-        conn.execute(
-            "INSERT OR IGNORE INTO memberships (group_id, user_id) VALUES (?, ?)",
-            (group["id"], user["id"]),
-        )
+        add_member(conn, group["id"], user)
     return {"id": group["id"], "name": group["name"], "code": group["code"]}
 
 
@@ -265,51 +285,49 @@ def get_group(group_id: int, request: Request):
         group = conn.execute(
             "SELECT id, name, code FROM groups WHERE id = ?", (group_id,)
         ).fetchone()
-        members = conn.execute(
-            "SELECT u.id, u.username FROM memberships m"
-            " JOIN users u ON u.id = m.user_id"
-            " WHERE m.group_id = ? ORDER BY u.id",
-            (group_id,),
-        ).fetchall()
-        expenses = conn.execute(
-            "SELECT e.id, e.description, e.amount_cents, e.paid_by,"
-            " u.username AS paid_by_name, e.created_at"
-            " FROM expenses e JOIN users u ON u.id = e.paid_by"
-            " WHERE e.group_id = ? ORDER BY e.id DESC",
-            (group_id,),
-        ).fetchall()
-    return {
-        "id": group["id"],
-        "name": group["name"],
-        "code": group["code"],
-        "members": [dict(m) for m in members],
-        "expenses": [dict(e) for e in expenses],
-        "balances": compute_balances(members, expenses),
-    }
+    return {"id": group["id"], "name": group["name"], "code": group["code"]}
 
 
-@app.post("/api/groups/{group_id}/expenses")
-def add_expense(group_id: int, body: ExpenseCreate, request: Request):
+@app.get("/api/groups/{group_id}/events")
+def get_events(group_id: int, request: Request, since: int = 0):
     user = require_user(request)
-    description = body.description.strip()
-    if not description:
-        raise HTTPException(400, "description required")
-    if body.amount_cents <= 0:
-        raise HTTPException(400, "amount must be positive")
     with db() as conn:
         require_member(conn, group_id, user["id"])
-        paid_by = body.paid_by or user["id"]
-        if not conn.execute(
-            "SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?",
-            (group_id, paid_by),
-        ).fetchone():
-            raise HTTPException(400, "payer must be a group member")
-        cur = conn.execute(
-            "INSERT INTO expenses (group_id, description, amount_cents, paid_by)"
-            " VALUES (?, ?, ?, ?)",
-            (group_id, description, body.amount_cents, paid_by),
+        rows = conn.execute(
+            "SELECT id, event_id, type, payload, author, created_at FROM events"
+            " WHERE group_id = ? AND id > ? ORDER BY id",
+            (group_id, since),
+        ).fetchall()
+        version = group_version(conn, group_id)
+    events = []
+    for r in rows:
+        e = dict(r)
+        e["payload"] = json.loads(e["payload"])
+        events.append(e)
+    return {"version": version, "events": events}
+
+
+@app.post("/api/groups/{group_id}/events")
+def post_event(group_id: int, body: EventIn, request: Request):
+    user = require_user(request)
+    if not body.event_id or not body.type:
+        raise HTTPException(400, "event_id and type required")
+    if body.type.startswith("member."):
+        # membership is server-owned routing state; it is logged by
+        # create/join, not forgeable through the generic event endpoint
+        raise HTTPException(400, "membership changes are not appended directly")
+    with db() as conn:
+        require_member(conn, group_id, user["id"])
+        existing = conn.execute(
+            "SELECT id FROM events WHERE event_id = ?", (body.event_id,)
+        ).fetchone()
+        if existing:
+            # idempotent: a retried push of the same event is a no-op
+            return {"id": existing["id"], "duplicate": True}
+        new_id = append_event(
+            conn, group_id, body.event_id, body.type, body.payload, user["id"]
         )
-    return {"id": cur.lastrowid}
+    return {"id": new_id}
 
 
 if os.path.isdir("static"):

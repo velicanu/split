@@ -67,53 +67,88 @@ def test_split_equally_distributes_remainder():
     assert sum(split_equally(1000, [3, 1, 2]).values()) == 1000
 
 
-def test_group_expense_flow():
+def events_of(client, group_id, since=0):
+    return client.get(f"/api/groups/{group_id}/events?since={since}").json()
+
+
+def test_group_ledger_flow():
     carol = signed_up("carol")
     dave = signed_up("dave")
 
     group = carol.post("/api/groups", json={"name": "Trip"}).json()
-    assert group["name"] == "Trip" and group["code"]
+    gid = group["id"]
 
-    # creator sees the group; dave is not a member yet
-    assert any(g["id"] == group["id"] for g in carol.get("/api/groups").json())
-    assert dave.get(f"/api/groups/{group['id']}").status_code == 404
+    # creating a group logs a member.added event; meta is readable
+    assert carol.get(f"/api/groups/{gid}").json()["name"] == "Trip"
+    feed = events_of(carol, gid)
+    assert [e["type"] for e in feed["events"]] == ["member.added"]
+    assert feed["events"][0]["payload"]["username"] == "carol"
+    assert feed["version"] == feed["events"][-1]["id"]
 
-    # dave joins by code and now sees it
-    assert (
-        dave.post("/api/groups/join", json={"code": group["code"]}).status_code == 200
+    # dave is not a member until he joins by code
+    assert dave.get(f"/api/groups/{gid}").status_code == 404
+    dave.post("/api/groups/join", json={"code": group["code"]})
+    feed = events_of(dave, gid)
+    assert [e["payload"]["username"] for e in feed["events"]] == ["carol", "dave"]
+    ids = {e["payload"]["username"]: e["payload"]["user_id"] for e in feed["events"]}
+    before = feed["version"]
+
+    # carol appends an expense.created event she paid for
+    r = carol.post(
+        f"/api/groups/{gid}/events",
+        json={
+            "event_id": "evt-1",
+            "type": "expense.created",
+            "payload": {
+                "description": "Dinner",
+                "amount_cents": 5000,
+                "paid_by": ids["carol"],
+            },
+        },
     )
-    assert any(g["id"] == group["id"] for g in dave.get("/api/groups").json())
+    assert r.status_code == 200
 
-    # carol pays for dinner, split between the two members
-    assert (
-        carol.post(
-            f"/api/groups/{group['id']}/expenses",
-            json={"description": "Dinner", "amount_cents": 5000},
-        ).status_code
-        == 200
+    # dave pulls only what's new (since the version he already had)
+    delta = events_of(dave, gid, before)
+    assert [e["type"] for e in delta["events"]] == ["expense.created"]
+    assert delta["events"][0]["payload"]["amount_cents"] == 5000
+    assert delta["version"] > before
+
+    # re-pushing the same event_id is an idempotent no-op
+    dup = carol.post(
+        f"/api/groups/{gid}/events",
+        json={"event_id": "evt-1", "type": "expense.created", "payload": {}},
+    ).json()
+    assert dup["duplicate"] is True
+    assert len(events_of(carol, gid, before)["events"]) == 1
+
+
+def test_membership_not_forgeable_via_event_log():
+    owner = signed_up("heidi")
+    group = owner.post("/api/groups", json={"name": "Flat"}).json()
+    r = owner.post(
+        f"/api/groups/{group['id']}/events",
+        json={"event_id": "x", "type": "member.added", "payload": {}},
     )
-
-    detail = dave.get(f"/api/groups/{group['id']}").json()
-    assert [e["description"] for e in detail["expenses"]] == ["Dinner"]
-    assert detail["expenses"][0]["paid_by_name"] == "carol"
-    net = {b["username"]: b["net_cents"] for b in detail["balances"]}
-    assert net == {"carol": 2500, "dave": -2500}
+    assert r.status_code == 400
 
 
 def test_group_access_control():
     owner = signed_up("frank")
-    group = owner.post("/api/groups", json={"name": "Flat"}).json()
+    group = owner.post("/api/groups", json={"name": "Flat2"}).json()
+    gid = group["id"]
 
     # bad invite code
     assert owner.post("/api/groups/join", json={"code": "nope"}).status_code == 404
 
-    # non-member cannot read or write the group
+    # non-member cannot read meta, pull events, or append events
     stranger = signed_up("grace")
-    assert stranger.get(f"/api/groups/{group['id']}").status_code == 404
+    assert stranger.get(f"/api/groups/{gid}").status_code == 404
+    assert stranger.get(f"/api/groups/{gid}/events").status_code == 404
     assert (
         stranger.post(
-            f"/api/groups/{group['id']}/expenses",
-            json={"description": "x", "amount_cents": 100},
+            f"/api/groups/{gid}/events",
+            json={"event_id": "e", "type": "expense.created", "payload": {}},
         ).status_code
         == 404
     )
@@ -122,8 +157,7 @@ def test_group_access_control():
     assert owner.post("/api/groups", json={"name": "  "}).status_code == 400
     assert (
         owner.post(
-            f"/api/groups/{group['id']}/expenses",
-            json={"description": "x", "amount_cents": 0},
+            f"/api/groups/{gid}/events", json={"event_id": "", "type": ""}
         ).status_code
         == 400
     )
