@@ -167,3 +167,69 @@ def test_requires_auth():
     anon = TestClient(app, base_url="https://testserver")
     assert anon.get("/api/groups").status_code == 401
     assert anon.post("/api/groups", json={"name": "x"}).status_code == 401
+
+
+def test_legacy_data_is_backfilled_into_events():
+    import main
+
+    # Simulate a group created before the event log existed: members live only
+    # in `memberships` and items only in the pre-ledger `expenses` table, with
+    # no rows in `events` (exactly the state a PR-1 -> PR-2 migration leaves).
+    a = signed_up("legacya")
+    signed_up("legacyb")
+    with main.db() as conn:
+        ida = conn.execute(
+            "SELECT id FROM users WHERE username = 'legacya'"
+        ).fetchone()["id"]
+        idb = conn.execute(
+            "SELECT id FROM users WHERE username = 'legacyb'"
+        ).fetchone()["id"]
+        gid = conn.execute(
+            "INSERT INTO groups (name, code, created_by) VALUES ('Legacy', 'legc', ?)",
+            (ida,),
+        ).lastrowid
+        conn.execute("INSERT INTO memberships VALUES (?, ?)", (gid, ida))
+        conn.execute("INSERT INTO memberships VALUES (?, ?)", (gid, idb))
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS expenses ("
+            " id INTEGER PRIMARY KEY, group_id INTEGER, description TEXT,"
+            " amount_cents INTEGER, paid_by INTEGER,"
+            " created_at TEXT DEFAULT (datetime('now')))"
+        )
+        conn.execute(
+            "INSERT INTO expenses (group_id, description, amount_cents, paid_by)"
+            " VALUES (?, 'Dinner', 5000, ?)",
+            (gid, ida),
+        )
+        conn.execute(
+            "INSERT INTO expenses (group_id, description, amount_cents, paid_by)"
+            " VALUES (?, 'Taxi', 2000, ?)",
+            (gid, idb),
+        )
+
+    # nothing is visible until the backfill runs
+    assert events_of(a, gid)["events"] == []
+
+    main.init_db()  # idempotent startup backfill
+
+    feed = events_of(a, gid)
+    types = [e["type"] for e in feed["events"]]
+    assert types.count("member.added") == 2
+    assert types.count("expense.created") == 2
+    descs = sorted(
+        e["payload"]["description"]
+        for e in feed["events"]
+        if e["type"] == "expense.created"
+    )
+    assert descs == ["Dinner", "Taxi"]
+
+    # running the backfill again must not duplicate anything
+    main.init_db()
+    assert len(events_of(a, gid)["events"]) == len(feed["events"])
+
+    # and a brand-new member now folds the complete history
+    c = signed_up("legacyc")
+    c.post("/api/groups/join", json={"code": "legc"})
+    ctypes = [e["type"] for e in events_of(c, gid)["events"]]
+    assert ctypes.count("expense.created") == 2
+    assert ctypes.count("member.added") == 3  # legacya, legacyb, legacyc

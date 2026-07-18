@@ -62,6 +62,70 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS events_group_id ON events (group_id, id)"
         )
+        backfill_legacy(conn)
+
+
+def _table_exists(conn, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def backfill_legacy(conn):
+    """Synthesize events for data created before the event log existed — groups,
+    memberships, and rows in the pre-ledger `expenses` table — so every client
+    can fold a complete history. Idempotent: safe to run on every startup."""
+    # A member.added event for each membership that lacks one.
+    for g in conn.execute("SELECT DISTINCT group_id FROM memberships").fetchall():
+        gid = g["group_id"]
+        have = {
+            json.loads(r["payload"])["user_id"]
+            for r in conn.execute(
+                "SELECT payload FROM events"
+                " WHERE group_id = ? AND type = 'member.added'",
+                (gid,),
+            ).fetchall()
+        }
+        members = conn.execute(
+            "SELECT u.id, u.username FROM memberships m"
+            " JOIN users u ON u.id = m.user_id"
+            " WHERE m.group_id = ? ORDER BY u.id",
+            (gid,),
+        ).fetchall()
+        for u in members:
+            if u["id"] in have:
+                continue
+            append_event(
+                conn,
+                gid,
+                f"legacy-member-{gid}-{u['id']}",
+                "member.added",
+                {"user_id": u["id"], "username": u["username"]},
+                u["id"],
+                ignore_dupe=True,
+            )
+    # An expense.created event for each row in the surviving pre-ledger table.
+    if _table_exists(conn, "expenses"):
+        for e in conn.execute(
+            "SELECT id, group_id, description, amount_cents, paid_by"
+            " FROM expenses ORDER BY id"
+        ).fetchall():
+            append_event(
+                conn,
+                e["group_id"],
+                f"legacy-expense-{e['id']}",
+                "expense.created",
+                {
+                    "description": e["description"],
+                    "amount_cents": e["amount_cents"],
+                    "paid_by": e["paid_by"],
+                },
+                e["paid_by"],
+                ignore_dupe=True,
+            )
 
 
 def hash_pw(password: str, salt: bytes) -> bytes:
@@ -88,7 +152,6 @@ class EventIn(BaseModel):
 
 
 app = FastAPI()
-init_db()
 
 
 def start_session(response: Response, user_id: int) -> None:
@@ -201,9 +264,12 @@ def group_version(conn, group_id: int) -> int:
     ).fetchone()[0]
 
 
-def append_event(conn, group_id, event_id, type_, payload, author) -> int:
+def append_event(
+    conn, group_id, event_id, type_, payload, author, ignore_dupe=False
+) -> int:
+    verb = "INSERT OR IGNORE INTO" if ignore_dupe else "INSERT INTO"
     cur = conn.execute(
-        "INSERT INTO events (group_id, event_id, type, payload, author)"
+        f"{verb} events (group_id, event_id, type, payload, author)"
         " VALUES (?, ?, ?, ?, ?)",
         (group_id, event_id, type_, json.dumps(payload), author),
     )
@@ -328,6 +394,11 @@ def post_event(group_id: int, body: EventIn, request: Request):
             conn, group_id, body.event_id, body.type, body.payload, user["id"]
         )
     return {"id": new_id}
+
+
+# Runs after all helpers are defined; also performs the idempotent legacy
+# backfill (see backfill_legacy).
+init_db()
 
 
 if os.path.isdir("static"):
