@@ -28,11 +28,17 @@ export function computeState(events) {
         memberIds.push(e.payload.user_id)
       }
     } else if (e.type === 'expense.created') {
+      // Each expense carries its own frozen split, so who owes what never
+      // changes when other people join later. Legacy events without a splits
+      // array predate this model and are ignored (WIP data is disposable — no
+      // backfill).
+      if (!Array.isArray(e.payload.splits)) continue
       expenses.push({
         id: e.id,
         description: e.payload.description,
         amount_cents: e.payload.amount_cents,
         paid_by: e.payload.paid_by,
+        splits: e.payload.splits,
       })
     }
   }
@@ -44,11 +50,10 @@ export function computeState(events) {
     owed[uid] = 0
   }
   for (const x of expenses) {
-    if (memberIds.length) {
-      const shares = splitEqually(x.amount_cents, memberIds)
-      for (const uid of memberIds) owed[uid] += shares[uid]
-    }
     if (x.paid_by in paid) paid[x.paid_by] += x.amount_cents
+    for (const s of x.splits) {
+      if (s.user_id in owed) owed[s.user_id] += s.share_cents
+    }
   }
 
   const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
@@ -58,7 +63,11 @@ export function computeState(events) {
     net_cents: paid[m.id] - owed[m.id],
   }))
   const ledger = expenses
-    .map((x) => ({ ...x, paid_by_name: nameById[x.paid_by] || '?' }))
+    .map((x) => ({
+      ...x,
+      paid_by_name: nameById[x.paid_by] || '?',
+      ways: x.splits.length,
+    }))
     .sort((a, b) => b.id - a.id)
 
   return { members, balances, ledger }

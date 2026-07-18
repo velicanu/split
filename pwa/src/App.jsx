@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { computeState } from './ledger'
+import { computeState, splitEqually } from './ledger'
 
 async function api(path, body) {
   const res = await fetch(`/api/${path}`, {
@@ -239,6 +239,7 @@ function GroupView({ groupId, me, onBack }) {
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')
   const [paidBy, setPaidBy] = useState('')
+  const [excluded, setExcluded] = useState([]) // members left out of this expense
   const [error, setError] = useState('')
   const versionRef = useRef(0)
 
@@ -261,6 +262,7 @@ function GroupView({ groupId, me, onBack }) {
     setEvents([])
     setVersion(0)
     setPaidBy('')
+    setExcluded([])
     api(`groups/${groupId}`)
       .then(setMeta)
       .catch((e) => setError(e.message))
@@ -287,6 +289,17 @@ function GroupView({ groupId, me, onBack }) {
       setError('Enter a description and a positive amount')
       return
     }
+    // Freeze the split now, over the chosen participants, so later joiners
+    // never change who owes what.
+    const chosen = state.members
+      .map((m) => m.id)
+      .filter((id) => !excluded.includes(id))
+    if (chosen.length === 0) {
+      setError('Pick at least one person to split between')
+      return
+    }
+    const shares = splitEqually(cents, chosen)
+    const splits = chosen.map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
     try {
       await api(`groups/${groupId}/events`, {
         event_id: crypto.randomUUID(),
@@ -295,10 +308,12 @@ function GroupView({ groupId, me, onBack }) {
           description: description.trim(),
           amount_cents: cents,
           paid_by: Number(paidBy),
+          splits,
         },
       })
       setDescription('')
       setAmount('')
+      setExcluded([])
       await pull()
     } catch (err) {
       setError(err.message)
@@ -356,6 +371,25 @@ function GroupView({ groupId, me, onBack }) {
             ))}
           </select>
         </label>
+        <fieldset className="participants">
+          <legend>split between</legend>
+          {state.members.map((m) => (
+            <label key={m.id} className="check">
+              <input
+                type="checkbox"
+                checked={!excluded.includes(m.id)}
+                onChange={() =>
+                  setExcluded((ex) =>
+                    ex.includes(m.id)
+                      ? ex.filter((x) => x !== m.id)
+                      : [...ex, m.id]
+                  )
+                }
+              />
+              {m.username}
+            </label>
+          ))}
+        </fieldset>
         <button type="submit">Add expense</button>
       </form>
 
@@ -367,6 +401,7 @@ function GroupView({ groupId, me, onBack }) {
             <span>{x.description}</span>
             <span className="muted">
               {x.paid_by_name} paid {money(x.amount_cents)}
+              {x.ways > 1 ? ` · split ${x.ways} ways` : ''}
             </span>
           </li>
         ))}
