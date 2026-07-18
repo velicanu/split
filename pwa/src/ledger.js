@@ -23,7 +23,7 @@ export function computeState(events) {
   // with the same expense_id; the latest one wins (append order is the total
   // order). Both payers and splits are frozen per revision.
   const latest = {}
-  // settlement_id -> { ev: latest revision, initiator: author of the create }
+  // settlement_id -> latest revision (anyone can record/edit/delete a payment)
   const settle = {}
 
   for (const e of events) {
@@ -47,12 +47,8 @@ export function computeState(events) {
     ) {
       const p = e.payload
       if (!p || !p.settlement_id) continue
-      // events arrive in ascending id, so the first seen is the create — its
-      // author is the initiator, who alone may edit/delete the payment.
-      const cur = settle[p.settlement_id]
-      if (!cur) settle[p.settlement_id] = { ev: e, initiator: e.author }
-      else if (e.id > cur.ev.id)
-        settle[p.settlement_id] = { ev: e, initiator: cur.initiator }
+      const prev = settle[p.settlement_id]
+      if (!prev || e.id > prev.id) settle[p.settlement_id] = e
     }
   }
 
@@ -91,7 +87,7 @@ export function computeState(events) {
     }
   }
 
-  const settlements = Object.values(settle).map(({ ev, initiator }) => ({
+  const settlements = Object.values(settle).map((ev) => ({
     id: ev.id,
     settlement_id: ev.payload.settlement_id,
     from: ev.payload.from,
@@ -99,7 +95,6 @@ export function computeState(events) {
     amount_cents: ev.payload.amount_cents,
     date: ev.payload.date || '',
     deleted: !!ev.payload.deleted,
-    initiator,
   }))
   // A payment moves money: the payer's net rises, the receiver's falls.
   for (const s of settlements) {

@@ -269,7 +269,6 @@ function GroupView({ groupId, me, onBack }) {
 
   // Everything displayed is folded from the ledger, client-side.
   const state = useMemo(() => computeState(events), [events])
-  const meId = memberIdFor(state.members, me)
   const suggestions = useMemo(() => simplify(state.balances), [state.balances])
 
   // Append a create or update event; an edit reuses the expense's stable id
@@ -436,7 +435,6 @@ function GroupView({ groupId, me, onBack }) {
       <h3>Payments</h3>
       <Payments
         payments={state.payments}
-        meId={meId}
         onEdit={editSettlement}
         onDelete={deleteSettlement}
       />
@@ -523,7 +521,7 @@ function SettleUp({ suggestions, onRecord }) {
 }
 
 // Recorded payments. Only the member who initiated one may edit or delete it.
-function Payments({ payments, meId, onEdit, onDelete }) {
+function Payments({ payments, onEdit, onDelete }) {
   const [editId, setEditId] = useState(null)
   const [amount, setAmount] = useState('')
   const [error, setError] = useState('')
@@ -533,7 +531,6 @@ function Payments({ payments, meId, onEdit, onDelete }) {
     <>
       <ul className="list">
         {payments.map((s) => {
-          const mine = s.initiator === meId
           const active = editId === s.settlement_id
           return (
             <li key={s.settlement_id} className="row static">
@@ -543,8 +540,7 @@ function Payments({ payments, meId, onEdit, onDelete }) {
                 </span>
                 <span className="muted">{s.date}</span>
               </div>
-              {mine &&
-                (active ? (
+              {active ? (
                   <span className="settle-edit">
                     <input
                       className="pay-amt"
@@ -598,7 +594,7 @@ function Payments({ payments, meId, onEdit, onDelete }) {
                       delete
                     </button>
                   </div>
-                ))}
+                )}
             </li>
           )
         })}
