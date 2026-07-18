@@ -25,6 +25,8 @@ export function computeState(events) {
   const latest = {}
   // settlement_id -> latest revision (anyone can record/edit/delete a payment)
   const settle = {}
+  // comment_id -> { ev: latest revision, createdId, author } (author edits own)
+  const commentRev = {}
 
   for (const e of events) {
     if (e.type === 'member.added') {
@@ -49,6 +51,12 @@ export function computeState(events) {
       if (!p || !p.settlement_id) continue
       const prev = settle[p.settlement_id]
       if (!prev || e.id > prev.id) settle[p.settlement_id] = e
+    } else if (e.type === 'comment.created' || e.type === 'comment.updated') {
+      const p = e.payload
+      if (!p || !p.comment_id || !p.expense_id) continue
+      const cur = commentRev[p.comment_id]
+      if (!cur) commentRev[p.comment_id] = { ev: e, createdId: e.id, author: e.author }
+      else if (e.id > cur.ev.id) commentRev[p.comment_id] = { ...cur, ev: e }
     }
   }
 
@@ -110,11 +118,30 @@ export function computeState(events) {
     username: m.username,
     net_cents: paid[m.id] - owed[m.id],
   }))
+  // Comments grouped under their expense, newest-created last (chronological).
+  const commentsByExpense = {}
+  for (const c of Object.values(commentRev)) {
+    if (c.ev.payload.deleted) continue
+    const eid = c.ev.payload.expense_id
+    ;(commentsByExpense[eid] ||= []).push({
+      comment_id: c.ev.payload.comment_id,
+      expense_id: eid,
+      text: c.ev.payload.text,
+      author: c.author,
+      author_name: nameById[c.author] || '?',
+      created_id: c.createdId,
+    })
+  }
+  for (const list of Object.values(commentsByExpense)) {
+    list.sort((a, b) => a.created_id - b.created_id)
+  }
+
   const ledger = expenses
     .map((x) => ({
       ...x,
       payer_names: x.payers.map((p) => nameById[p.user_id] || '?'),
       ways: x.splits.length,
+      comments: commentsByExpense[x.expense_id] || [],
     }))
     .sort(byDateDesc)
   const payments = settlements
