@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { computeState } from './ledger'
 
 async function api(path, body) {
@@ -15,7 +22,39 @@ async function api(path, body) {
 const money = (cents) =>
   `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`
 
+// A crash must never leave a blank screen — show a reload prompt instead.
+// (Most likely cause: the app updated and a stale tab is running old code
+// against a newer API.)
+class ErrorBoundary extends Component {
+  state = { crashed: false }
+
+  static getDerivedStateFromError() {
+    return { crashed: true }
+  }
+
+  render() {
+    if (this.state.crashed) {
+      return (
+        <main>
+          <h1>Something went wrong</h1>
+          <p className="muted">The app may have updated — reload to continue.</p>
+          <button onClick={() => window.location.reload()}>Reload</button>
+        </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
 export default function App() {
+  return (
+    <ErrorBoundary>
+      <Split />
+    </ErrorBoundary>
+  )
+}
+
+function Split() {
   const [user, setUser] = useState(null)
   const [checking, setChecking] = useState(true)
 
