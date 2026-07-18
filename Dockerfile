@@ -1,4 +1,4 @@
-FROM node:22-alpine AS pwa
+FROM node:26-alpine AS pwa
 WORKDIR /pwa
 COPY pwa/package.json ./
 RUN npm install
