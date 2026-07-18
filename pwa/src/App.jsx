@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { computeState } from './ledger'
 
 async function api(path, body) {
   const res = await fetch(`/api/${path}`, {
@@ -193,23 +194,51 @@ function GroupList({ onOpen }) {
 }
 
 function GroupView({ groupId, me, onBack }) {
-  const [group, setGroup] = useState(null)
+  const [meta, setMeta] = useState(null)
+  const [events, setEvents] = useState([])
+  const [version, setVersion] = useState(0)
   const [description, setDescription] = useState('')
   const [amount, setAmount] = useState('')
   const [paidBy, setPaidBy] = useState('')
   const [error, setError] = useState('')
+  const versionRef = useRef(0)
 
-  const load = () =>
-    api(`groups/${groupId}`)
-      .then((g) => {
-        setGroup(g)
-        const mine = g.members.find((m) => m.username === me.username)
-        setPaidBy(String((mine || g.members[0]).id))
-      })
-      .catch((e) => setError(e.message))
-  useEffect(() => {
-    load()
+  // Pull only what's newer than what we already hold, then append it.
+  const pull = useCallback(async () => {
+    try {
+      const res = await api(`groups/${groupId}/events?since=${versionRef.current}`)
+      if (res.events.length) {
+        versionRef.current = res.version
+        setVersion(res.version)
+        setEvents((prev) => [...prev, ...res.events])
+      }
+    } catch (err) {
+      setError(err.message)
+    }
   }, [groupId])
+
+  useEffect(() => {
+    versionRef.current = 0
+    setEvents([])
+    setVersion(0)
+    setPaidBy('')
+    api(`groups/${groupId}`)
+      .then(setMeta)
+      .catch((e) => setError(e.message))
+    pull()
+    const timer = setInterval(pull, 5000)
+    return () => clearInterval(timer)
+  }, [groupId, pull])
+
+  // Everything displayed is folded from the ledger, client-side.
+  const state = useMemo(() => computeState(events), [events])
+
+  useEffect(() => {
+    if (!paidBy && state.members.length) {
+      const mine = state.members.find((m) => m.username === me.username)
+      setPaidBy(String((mine || state.members[0]).id))
+    }
+  }, [state.members, me.username, paidBy])
 
   async function addExpense(e) {
     e.preventDefault()
@@ -220,34 +249,38 @@ function GroupView({ groupId, me, onBack }) {
       return
     }
     try {
-      await api(`groups/${groupId}/expenses`, {
-        description,
-        amount_cents: cents,
-        paid_by: Number(paidBy),
+      await api(`groups/${groupId}/events`, {
+        event_id: crypto.randomUUID(),
+        type: 'expense.created',
+        payload: {
+          description: description.trim(),
+          amount_cents: cents,
+          paid_by: Number(paidBy),
+        },
       })
       setDescription('')
       setAmount('')
-      await load()
+      await pull()
     } catch (err) {
       setError(err.message)
     }
   }
 
-  if (!group) return null
+  if (!meta) return null
 
   return (
     <section>
       <button className="link" onClick={onBack}>
         ← groups
       </button>
-      <h2>{group.name}</h2>
+      <h2>{meta.name}</h2>
       <p className="muted">
-        Invite code: <code>{group.code}</code>
+        Invite code: <code>{meta.code}</code> · synced v{version}
       </p>
 
       <h3>Balances</h3>
       <ul className="list">
-        {group.balances.map((b) => (
+        {state.balances.map((b) => (
           <li key={b.user_id} className="row static">
             <span>{b.username}</span>
             <span className={b.net_cents >= 0 ? 'pos' : 'neg'}>
@@ -277,7 +310,7 @@ function GroupView({ groupId, me, onBack }) {
         <label className="field">
           paid by
           <select value={paidBy} onChange={(e) => setPaidBy(e.target.value)}>
-            {group.members.map((m) => (
+            {state.members.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.username}
               </option>
@@ -288,13 +321,13 @@ function GroupView({ groupId, me, onBack }) {
       </form>
 
       <h3>Ledger</h3>
-      {group.expenses.length === 0 && <p className="muted">No expenses yet.</p>}
+      {state.ledger.length === 0 && <p className="muted">No expenses yet.</p>}
       <ul className="list">
-        {group.expenses.map((e) => (
-          <li key={e.id} className="row static">
-            <span>{e.description}</span>
+        {state.ledger.map((x) => (
+          <li key={x.id} className="row static">
+            <span>{x.description}</span>
             <span className="muted">
-              {e.paid_by_name} paid {money(e.amount_cents)}
+              {x.paid_by_name} paid {money(x.amount_cents)}
             </span>
           </li>
         ))}
