@@ -53,6 +53,9 @@ export function computeState(events) {
       splits: p.splits,
       date: p.date || '',
       category: p.category || '',
+      // Soft delete: the row stays in the log with its data intact so it can
+      // be shown struck-through and restored; it just stops counting.
+      deleted: !!p.deleted,
     }
   })
 
@@ -63,6 +66,7 @@ export function computeState(events) {
     owed[uid] = 0
   }
   for (const x of expenses) {
+    if (x.deleted) continue // deleted expenses don't affect balances
     for (const pay of x.payers) {
       if (pay.user_id in paid) paid[pay.user_id] += pay.paid_cents
     }

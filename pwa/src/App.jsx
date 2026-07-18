@@ -282,6 +282,30 @@ function GroupView({ groupId, me, onBack }) {
     await pull()
   }
 
+  // Soft delete / restore is just another revision with the flag flipped.
+  async function setDeleted(x, deleted) {
+    try {
+      await api(`groups/${groupId}/events`, {
+        event_id: crypto.randomUUID(),
+        type: 'expense.updated',
+        payload: {
+          expense_id: x.expense_id,
+          description: x.description,
+          amount_cents: x.amount_cents,
+          payers: x.payers,
+          splits: x.splits,
+          date: x.date,
+          category: x.category,
+          deleted,
+          updated_at: Date.now(),
+        },
+      })
+      await pull()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   if (!meta) return null
 
   return (
@@ -325,9 +349,15 @@ function GroupView({ groupId, me, onBack }) {
       {state.ledger.length === 0 && <p className="muted">No expenses yet.</p>}
       <ul className="list">
         {state.ledger.map((x) => (
-          <li key={x.expense_id} className="row static">
+          <li
+            key={x.expense_id}
+            className={`row static${x.deleted ? ' deleted' : ''}`}
+          >
             <div className="expense">
-              <span>{x.description}</span>
+              <span>
+                {x.description}
+                {x.deleted ? ' (deleted)' : ''}
+              </span>
               <span className="muted">
                 {x.payer_names.join(', ')} paid {money(x.amount_cents)} · split{' '}
                 {x.ways} way{x.ways === 1 ? '' : 's'}
@@ -335,9 +365,23 @@ function GroupView({ groupId, me, onBack }) {
                 {x.category ? ` · ${x.category}` : ''}
               </span>
             </div>
-            <button className="link" onClick={() => setEditing(x)}>
-              edit
-            </button>
+            <div className="row-actions">
+              <button className="link" onClick={() => setEditing(x)}>
+                edit
+              </button>
+              {x.deleted ? (
+                <button className="link" onClick={() => setDeleted(x, false)}>
+                  restore
+                </button>
+              ) : (
+                <button
+                  className="link danger"
+                  onClick={() => setDeleted(x, true)}
+                >
+                  delete
+                </button>
+              )}
+            </div>
           </li>
         ))}
       </ul>
@@ -431,6 +475,7 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
           splits,
           date,
           category: category.trim(),
+          deleted: initial?.deleted ?? false,
           updated_at: Date.now(),
         },
         !!initial
