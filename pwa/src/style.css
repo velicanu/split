@@ -42,3 +42,113 @@ button {
 .error {
   color: #dc2626;
 }
+
+main.app {
+  text-align: left;
+  width: 100%;
+  max-width: 440px;
+  align-self: flex-start;
+  padding: 1.5rem;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.brand {
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.spacer {
+  flex: 1;
+}
+
+h2,
+h3 {
+  margin: 1.25rem 0 0.5rem;
+}
+
+.muted {
+  color: #64748b;
+}
+
+.pos {
+  color: #16a34a;
+}
+
+.neg {
+  color: #dc2626;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: white;
+  color: inherit;
+  font-size: 1rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row.static {
+  cursor: default;
+}
+
+.cols {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.cols form {
+  width: auto;
+  flex: 1;
+  min-width: 160px;
+}
+
+.link {
+  width: auto;
+  padding: 0;
+  background: none;
+  color: #16a34a;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+  color: #64748b;
+}
+
+select {
+  padding: 0.55rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+
+code {
+  background: #f1f5f9;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
