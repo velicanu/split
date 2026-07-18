@@ -19,7 +19,10 @@ export function splitEqually(amountCents, memberIds) {
 export function computeState(events) {
   const members = []
   const memberIds = []
-  const expenses = []
+  // expense_id -> its latest event. An edit is just a new expense.updated row
+  // with the same expense_id; the latest one wins (append order is the total
+  // order). Both payers and splits are frozen per revision.
+  const latest = {}
 
   for (const e of events) {
     if (e.type === 'member.added') {
@@ -27,21 +30,31 @@ export function computeState(events) {
         members.push({ id: e.payload.user_id, username: e.payload.username })
         memberIds.push(e.payload.user_id)
       }
-    } else if (e.type === 'expense.created') {
-      // Each expense carries its own frozen split, so who owes what never
-      // changes when other people join later. Legacy events without a splits
-      // array predate this model and are ignored (WIP data is disposable — no
-      // backfill).
-      if (!Array.isArray(e.payload.splits)) continue
-      expenses.push({
-        id: e.id,
-        description: e.payload.description,
-        amount_cents: e.payload.amount_cents,
-        paid_by: e.payload.paid_by,
-        splits: e.payload.splits,
-      })
+    } else if (e.type === 'expense.created' || e.type === 'expense.updated') {
+      const p = e.payload
+      // A well-formed expense carries a stable id, its payers, and its splits.
+      // Rows from older models (single paid_by, no expense_id) are ignored —
+      // WIP data is disposable, no backfill.
+      if (!p || !p.expense_id) continue
+      if (!Array.isArray(p.payers) || !Array.isArray(p.splits)) continue
+      const prev = latest[p.expense_id]
+      if (!prev || e.id > prev.id) latest[p.expense_id] = e
     }
   }
+
+  const expenses = Object.values(latest).map((e) => {
+    const p = e.payload
+    return {
+      id: e.id,
+      expense_id: p.expense_id,
+      description: p.description,
+      amount_cents: p.amount_cents,
+      payers: p.payers,
+      splits: p.splits,
+      date: p.date || '',
+      category: p.category || '',
+    }
+  })
 
   const paid = {}
   const owed = {}
@@ -50,7 +63,9 @@ export function computeState(events) {
     owed[uid] = 0
   }
   for (const x of expenses) {
-    if (x.paid_by in paid) paid[x.paid_by] += x.amount_cents
+    for (const pay of x.payers) {
+      if (pay.user_id in paid) paid[pay.user_id] += pay.paid_cents
+    }
     for (const s of x.splits) {
       if (s.user_id in owed) owed[s.user_id] += s.share_cents
     }
@@ -65,10 +80,10 @@ export function computeState(events) {
   const ledger = expenses
     .map((x) => ({
       ...x,
-      paid_by_name: nameById[x.paid_by] || '?',
+      payer_names: x.payers.map((p) => nameById[p.user_id] || '?'),
       ways: x.splits.length,
     }))
-    .sort((a, b) => b.id - a.id)
+    .sort((a, b) => (a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1))
 
   return { members, balances, ledger }
 }

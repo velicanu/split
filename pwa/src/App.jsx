@@ -236,10 +236,7 @@ function GroupView({ groupId, me, onBack }) {
   const [meta, setMeta] = useState(null)
   const [events, setEvents] = useState([])
   const [version, setVersion] = useState(0)
-  const [description, setDescription] = useState('')
-  const [amount, setAmount] = useState('')
-  const [paidBy, setPaidBy] = useState('')
-  const [excluded, setExcluded] = useState([]) // members left out of this expense
+  const [editing, setEditing] = useState(null) // null = add mode; else an expense
   const [error, setError] = useState('')
   const versionRef = useRef(0)
 
@@ -261,8 +258,7 @@ function GroupView({ groupId, me, onBack }) {
     versionRef.current = 0
     setEvents([])
     setVersion(0)
-    setPaidBy('')
-    setExcluded([])
+    setEditing(null)
     api(`groups/${groupId}`)
       .then(setMeta)
       .catch((e) => setError(e.message))
@@ -274,50 +270,16 @@ function GroupView({ groupId, me, onBack }) {
   // Everything displayed is folded from the ledger, client-side.
   const state = useMemo(() => computeState(events), [events])
 
-  useEffect(() => {
-    if (!paidBy && state.members.length) {
-      const mine = state.members.find((m) => m.username === me.username)
-      setPaidBy(String((mine || state.members[0]).id))
-    }
-  }, [state.members, me.username, paidBy])
-
-  async function addExpense(e) {
-    e.preventDefault()
-    setError('')
-    const cents = Math.round(parseFloat(amount) * 100)
-    if (!description.trim() || !cents || cents <= 0) {
-      setError('Enter a description and a positive amount')
-      return
-    }
-    // Freeze the split now, over the chosen participants, so later joiners
-    // never change who owes what.
-    const chosen = state.members
-      .map((m) => m.id)
-      .filter((id) => !excluded.includes(id))
-    if (chosen.length === 0) {
-      setError('Pick at least one person to split between')
-      return
-    }
-    const shares = splitEqually(cents, chosen)
-    const splits = chosen.map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
-    try {
-      await api(`groups/${groupId}/events`, {
-        event_id: crypto.randomUUID(),
-        type: 'expense.created',
-        payload: {
-          description: description.trim(),
-          amount_cents: cents,
-          paid_by: Number(paidBy),
-          splits,
-        },
-      })
-      setDescription('')
-      setAmount('')
-      setExcluded([])
-      await pull()
-    } catch (err) {
-      setError(err.message)
-    }
+  // Append a create or update event; an edit reuses the expense's stable id
+  // so the fold treats it as the latest revision of the same expense.
+  async function submitExpense(payload, isEdit) {
+    await api(`groups/${groupId}/events`, {
+      event_id: crypto.randomUUID(),
+      type: isEdit ? 'expense.updated' : 'expense.created',
+      payload,
+    })
+    setEditing(null)
+    await pull()
   }
 
   if (!meta) return null
@@ -348,65 +310,211 @@ function GroupView({ groupId, me, onBack }) {
         ))}
       </ul>
 
-      <form onSubmit={addExpense}>
-        <h3>Add an expense</h3>
-        <input
-          placeholder="description"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
+      {state.members.length > 0 && (
+        <ExpenseForm
+          key={editing?.expense_id || 'new'}
+          members={state.members}
+          me={me}
+          initial={editing}
+          onSubmit={submitExpense}
+          onCancel={() => setEditing(null)}
         />
-        <input
-          placeholder="amount (e.g. 42.50)"
-          inputMode="decimal"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-        />
-        <label className="field">
-          paid by
-          <select value={paidBy} onChange={(e) => setPaidBy(e.target.value)}>
-            {state.members.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.username}
-              </option>
-            ))}
-          </select>
-        </label>
-        <fieldset className="participants">
-          <legend>split between</legend>
-          {state.members.map((m) => (
-            <label key={m.id} className="check">
-              <input
-                type="checkbox"
-                checked={!excluded.includes(m.id)}
-                onChange={() =>
-                  setExcluded((ex) =>
-                    ex.includes(m.id)
-                      ? ex.filter((x) => x !== m.id)
-                      : [...ex, m.id]
-                  )
-                }
-              />
-              {m.username}
-            </label>
-          ))}
-        </fieldset>
-        <button type="submit">Add expense</button>
-      </form>
+      )}
 
       <h3>Ledger</h3>
       {state.ledger.length === 0 && <p className="muted">No expenses yet.</p>}
       <ul className="list">
         {state.ledger.map((x) => (
-          <li key={x.id} className="row static">
-            <span>{x.description}</span>
-            <span className="muted">
-              {x.paid_by_name} paid {money(x.amount_cents)}
-              {x.ways > 1 ? ` · split ${x.ways} ways` : ''}
-            </span>
+          <li key={x.expense_id} className="row static">
+            <div className="expense">
+              <span>{x.description}</span>
+              <span className="muted">
+                {x.payer_names.join(', ')} paid {money(x.amount_cents)} · split{' '}
+                {x.ways} way{x.ways === 1 ? '' : 's'}
+                {x.date ? ` · ${x.date}` : ''}
+                {x.category ? ` · ${x.category}` : ''}
+              </span>
+            </div>
+            <button className="link" onClick={() => setEditing(x)}>
+              edit
+            </button>
           </li>
         ))}
       </ul>
       {error && <p className="error">{error}</p>}
     </section>
+  )
+}
+
+function memberIdFor(members, me) {
+  const mine = members.find((m) => m.username === me.username)
+  return (mine || members[0])?.id
+}
+
+function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [description, setDescription] = useState(initial?.description ?? '')
+  const [amount, setAmount] = useState(
+    initial ? (initial.amount_cents / 100).toFixed(2) : ''
+  )
+  const [date, setDate] = useState(initial?.date || today)
+  const [category, setCategory] = useState(initial?.category ?? '')
+  // members left OUT of the split (so members who join later default to "in")
+  const [excluded, setExcluded] = useState(() => {
+    if (!initial) return []
+    const inSplit = initial.splits.map((s) => s.user_id)
+    return members.map((m) => m.id).filter((id) => !inSplit.includes(id))
+  })
+  const [payerIds, setPayerIds] = useState(() =>
+    initial ? initial.payers.map((p) => p.user_id) : [memberIdFor(members, me)]
+  )
+  const [payerAmounts, setPayerAmounts] = useState(() =>
+    initial
+      ? Object.fromEntries(
+          initial.payers.map((p) => [p.user_id, (p.paid_cents / 100).toFixed(2)])
+        )
+      : {}
+  )
+  const [error, setError] = useState('')
+
+  const toggle = (list, setList, id) =>
+    setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
+
+  async function submit(e) {
+    e.preventDefault()
+    setError('')
+    const cents = Math.round(parseFloat(amount) * 100)
+    if (!description.trim() || !cents || cents <= 0) {
+      return setError('Enter a description and a positive amount')
+    }
+    if (!date) return setError('Pick a date')
+
+    const participants = members
+      .map((m) => m.id)
+      .filter((id) => !excluded.includes(id))
+    if (!participants.length) {
+      return setError('Pick at least one person to split between')
+    }
+    const shares = splitEqually(cents, participants)
+    const splits = participants.map((uid) => ({
+      user_id: uid,
+      share_cents: shares[uid],
+    }))
+
+    if (!payerIds.length) return setError('Pick who paid')
+    let payers
+    if (payerIds.length === 1) {
+      payers = [{ user_id: payerIds[0], paid_cents: cents }]
+    } else {
+      payers = payerIds.map((uid) => ({
+        user_id: uid,
+        paid_cents: Math.round(parseFloat(payerAmounts[uid]) * 100) || 0,
+      }))
+      if (payers.some((p) => p.paid_cents <= 0)) {
+        return setError('Each payer must have paid a positive amount')
+      }
+      const sum = payers.reduce((t, p) => t + p.paid_cents, 0)
+      if (sum !== cents) {
+        return setError(
+          `Payments must add up to ${money(cents)} (now ${money(sum)})`
+        )
+      }
+    }
+
+    try {
+      await onSubmit(
+        {
+          expense_id: initial?.expense_id ?? crypto.randomUUID(),
+          description: description.trim(),
+          amount_cents: cents,
+          payers,
+          splits,
+          date,
+          category: category.trim(),
+          updated_at: Date.now(),
+        },
+        !!initial
+      )
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <h3>{initial ? 'Edit expense' : 'Add an expense'}</h3>
+      <input
+        placeholder="description"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+      />
+      <input
+        placeholder="amount (e.g. 42.50)"
+        inputMode="decimal"
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+      />
+      <label className="field">
+        date
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      </label>
+      <input
+        placeholder="category (optional)"
+        value={category}
+        onChange={(e) => setCategory(e.target.value)}
+      />
+
+      <fieldset className="participants">
+        <legend>paid by</legend>
+        {members.map((m) => {
+          const checked = payerIds.includes(m.id)
+          return (
+            <label key={m.id} className="check">
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggle(payerIds, setPayerIds, m.id)}
+              />
+              {m.username}
+              {checked && payerIds.length > 1 && (
+                <input
+                  className="pay-amt"
+                  inputMode="decimal"
+                  placeholder="0.00"
+                  value={payerAmounts[m.id] ?? ''}
+                  onChange={(e) =>
+                    setPayerAmounts((a) => ({ ...a, [m.id]: e.target.value }))
+                  }
+                />
+              )}
+            </label>
+          )
+        })}
+      </fieldset>
+
+      <fieldset className="participants">
+        <legend>split between</legend>
+        {members.map((m) => (
+          <label key={m.id} className="check">
+            <input
+              type="checkbox"
+              checked={!excluded.includes(m.id)}
+              onChange={() => toggle(excluded, setExcluded, m.id)}
+            />
+            {m.username}
+          </label>
+        ))}
+      </fieldset>
+
+      <div className="row-actions">
+        <button type="submit">{initial ? 'Save changes' : 'Add expense'}</button>
+        {initial && (
+          <button type="button" className="link" onClick={onCancel}>
+            cancel
+          </button>
+        )}
+      </div>
+      {error && <p className="error">{error}</p>}
+    </form>
   )
 }
