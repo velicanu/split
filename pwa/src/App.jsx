@@ -237,6 +237,7 @@ function GroupView({ groupId, me, onBack }) {
   const [events, setEvents] = useState([])
   const [version, setVersion] = useState(0)
   const [editing, setEditing] = useState(null) // null = add mode; else an expense
+  const [viewingId, setViewingId] = useState(null) // expense_id shown in detail
   const [error, setError] = useState('')
   const versionRef = useRef(0)
 
@@ -259,6 +260,7 @@ function GroupView({ groupId, me, onBack }) {
     setEvents([])
     setVersion(0)
     setEditing(null)
+    setViewingId(null)
     api(`groups/${groupId}`)
       .then(setMeta)
       .catch((e) => setError(e.message))
@@ -270,6 +272,11 @@ function GroupView({ groupId, me, onBack }) {
   // Everything displayed is folded from the ledger, client-side.
   const state = useMemo(() => computeState(events), [events])
   const suggestions = useMemo(() => simplify(state.balances), [state.balances])
+  const meId = memberIdFor(state.members, me)
+  // Look the viewed expense up live so edits/new comments show while it's open.
+  const viewing = viewingId
+    ? state.ledger.find((x) => x.expense_id === viewingId) || null
+    : null
 
   // Append a create or update event; an edit reuses the expense's stable id
   // so the fold treats it as the latest revision of the same expense.
@@ -345,6 +352,36 @@ function GroupView({ groupId, me, onBack }) {
       true
     )
 
+  // Comments are ledger events attached to an expense; author edits/deletes own.
+  async function appendComment(payload, isEdit) {
+    try {
+      await api(`groups/${groupId}/events`, {
+        event_id: crypto.randomUUID(),
+        type: isEdit ? 'comment.updated' : 'comment.created',
+        payload: { ...payload, updated_at: Date.now() },
+      })
+      await pull()
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }
+  const postComment = (expense_id, text) =>
+    appendComment(
+      { comment_id: crypto.randomUUID(), expense_id, text, deleted: false },
+      false
+    )
+  const editComment = (c, text) =>
+    appendComment(
+      { comment_id: c.comment_id, expense_id: c.expense_id, text, deleted: false },
+      true
+    )
+  const deleteComment = (c) =>
+    appendComment(
+      { comment_id: c.comment_id, expense_id: c.expense_id, text: c.text, deleted: true },
+      true
+    )
+
   if (!meta) return null
 
   return (
@@ -395,7 +432,10 @@ function GroupView({ groupId, me, onBack }) {
             key={x.expense_id}
             className={`row static${x.deleted ? ' deleted' : ''}`}
           >
-            <div className="expense">
+            <div
+              className="expense clickable"
+              onClick={() => setViewingId(x.expense_id)}
+            >
               <span>
                 {x.description}
                 {x.deleted ? ' (deleted)' : ''}
@@ -405,6 +445,7 @@ function GroupView({ groupId, me, onBack }) {
                 {x.ways} way{x.ways === 1 ? '' : 's'}
                 {x.date ? ` · ${x.date}` : ''}
                 {x.category ? ` · ${x.category}` : ''}
+                {x.comments.length > 0 ? ` · 💬 ${x.comments.length}` : ''}
               </span>
             </div>
             <div className="row-actions">
@@ -439,7 +480,160 @@ function GroupView({ groupId, me, onBack }) {
         onDelete={deleteSettlement}
       />
       {error && <p className="error">{error}</p>}
+
+      {viewing && (
+        <ExpenseDetail
+          expense={viewing}
+          members={state.members}
+          meId={meId}
+          onClose={() => setViewingId(null)}
+          onPost={postComment}
+          onEdit={editComment}
+          onDelete={deleteComment}
+        />
+      )}
     </section>
+  )
+}
+
+// Detail overlay for one expense: per-person paid/owed, plus comments (anyone
+// can post; you may edit/delete your own).
+function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDelete }) {
+  const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
+  const [text, setText] = useState('')
+  const [editId, setEditId] = useState(null)
+  const [editText, setEditText] = useState('')
+  const [error, setError] = useState('')
+
+  async function post(e) {
+    e.preventDefault()
+    if (!text.trim()) return
+    try {
+      await onPost(expense.expense_id, text.trim())
+      setText('')
+    } catch {
+      setError('Could not post comment')
+    }
+  }
+  async function saveEdit(c) {
+    if (!editText.trim()) return
+    try {
+      await onEdit(c, editText.trim())
+      setEditId(null)
+    } catch {
+      setError('Could not save comment')
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <button className="link close" onClick={onClose}>
+          ×
+        </button>
+        <h3>
+          {expense.description}
+          {expense.deleted ? ' (deleted)' : ''}
+        </h3>
+        <p className="muted">
+          {money(expense.amount_cents)}
+          {expense.date ? ` · ${expense.date}` : ''}
+          {expense.category ? ` · ${expense.category}` : ''}
+        </p>
+
+        <h4>Paid</h4>
+        <ul className="list">
+          {expense.payers.map((p) => (
+            <li key={p.user_id} className="row static">
+              <span>{nameById[p.user_id] || '?'}</span>
+              <span>{money(p.paid_cents)}</span>
+            </li>
+          ))}
+        </ul>
+
+        <h4>Owes</h4>
+        <ul className="list">
+          {expense.splits.map((s) => (
+            <li key={s.user_id} className="row static">
+              <span>{nameById[s.user_id] || '?'}</span>
+              <span>{money(s.share_cents)}</span>
+            </li>
+          ))}
+        </ul>
+
+        <h4>Comments</h4>
+        {expense.comments.length === 0 && (
+          <p className="muted">No comments yet.</p>
+        )}
+        <ul className="list">
+          {expense.comments.map((c) => {
+            const active = editId === c.comment_id
+            return (
+              <li key={c.comment_id} className="row static">
+                {active ? (
+                  <span className="settle-edit">
+                    <input
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => saveEdit(c)}
+                    >
+                      save
+                    </button>
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => setEditId(null)}
+                    >
+                      cancel
+                    </button>
+                  </span>
+                ) : (
+                  <>
+                    <div className="expense">
+                      <span>{c.text}</span>
+                      <span className="muted">{c.author_name}</span>
+                    </div>
+                    {c.author === meId && (
+                      <div className="row-actions">
+                        <button
+                          className="link"
+                          onClick={() => {
+                            setEditId(c.comment_id)
+                            setEditText(c.text)
+                          }}
+                        >
+                          edit
+                        </button>
+                        <button
+                          className="link danger"
+                          onClick={() => onDelete(c)}
+                        >
+                          delete
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </li>
+            )
+          })}
+        </ul>
+
+        <form onSubmit={post}>
+          <input
+            placeholder="add a comment"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <button type="submit">Post</button>
+        </form>
+        {error && <p className="error">{error}</p>}
+      </div>
+    </div>
   )
 }
 
