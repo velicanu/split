@@ -50,7 +50,9 @@ init_db()
 def start_session(response: Response, user_id: int) -> None:
     token = secrets.token_hex(32)
     with db() as conn:
-        conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
+        conn.execute(
+            "INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id)
+        )
     response.set_cookie(COOKIE, token, httponly=True, samesite="lax", secure=True)
 
 
@@ -92,7 +94,9 @@ def login(creds: Credentials, response: Response):
             "SELECT id, username, salt, pw_hash FROM users WHERE username = ?",
             (creds.username.strip(),),
         ).fetchone()
-    if not user or not hmac.compare_digest(user["pw_hash"], hash_pw(creds.password, user["salt"])):
+    if not user or not hmac.compare_digest(
+        user["pw_hash"], hash_pw(creds.password, user["salt"])
+    ):
         raise HTTPException(401, "invalid username or password")
     start_session(response, user["id"])
     return {"username": user["username"]}

@@ -17,16 +17,37 @@ def test_signup_login_flow():
     assert r.status_code == 200
     assert client.get("/api/me").json() == {"username": "alice"}
 
-    assert client.post("/api/signup", json={"username": "alice", "password": "x"}).status_code == 409
+    assert (
+        client.post(
+            "/api/signup", json={"username": "alice", "password": "x"}
+        ).status_code
+        == 409
+    )
 
     client.post("/api/logout", json={})
     assert client.get("/api/me").status_code == 401
 
-    assert client.post("/api/login", json={"username": "alice", "password": "wrong"}).status_code == 401
-    assert client.post("/api/login", json={"username": "alice", "password": "pw"}).status_code == 200
+    assert (
+        client.post(
+            "/api/login", json={"username": "alice", "password": "wrong"}
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/login", json={"username": "alice", "password": "pw"}
+        ).status_code
+        == 200
+    )
     assert client.get("/api/me").json() == {"username": "alice"}
 
 
 def test_signup_requires_fields():
-    assert client.post("/api/signup", json={"username": " ", "password": "pw"}).status_code == 400
-    assert client.post("/api/signup", json={"username": "bob", "password": ""}).status_code == 400
+    assert (
+        client.post("/api/signup", json={"username": " ", "password": "pw"}).status_code
+        == 400
+    )
+    assert (
+        client.post("/api/signup", json={"username": "bob", "password": ""}).status_code
+        == 400
+    )

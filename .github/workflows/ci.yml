@@ -10,11 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v8
         with:
           python-version: "3.12"
-      - run: pip install -r server/requirements.txt pytest httpx
-      - run: pytest server/
+          activate-environment: true
+      - run: uv sync
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: pytest
 
   build:
     runs-on: ubuntu-latest
