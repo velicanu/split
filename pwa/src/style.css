@@ -181,10 +181,16 @@ code {
   margin: 0;
 }
 
-.check input.pay-amt {
+input.pay-amt {
   width: 5rem;
   padding: 0.35rem;
   margin-left: 0.35rem;
+}
+
+.settle-edit {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
 .expense {
