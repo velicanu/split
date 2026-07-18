@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { computeState, splitEqually } from './ledger'
+import { computeState, simplify, splitEqually } from './ledger'
 
 async function api(path, body) {
   const res = await fetch(`/api/${path}`, {
@@ -269,6 +269,8 @@ function GroupView({ groupId, me, onBack }) {
 
   // Everything displayed is folded from the ledger, client-side.
   const state = useMemo(() => computeState(events), [events])
+  const meId = memberIdFor(state.members, me)
+  const suggestions = useMemo(() => simplify(state.balances), [state.balances])
 
   // Append a create or update event; an edit reuses the expense's stable id
   // so the fold treats it as the latest revision of the same expense.
@@ -306,6 +308,44 @@ function GroupView({ groupId, me, onBack }) {
     }
   }
 
+  // Settlements are ledger events too. Suggestions are derived (never stored);
+  // recording/editing/deleting a payment is what actually moves balances.
+  async function appendSettlement(payload, isEdit) {
+    try {
+      await api(`groups/${groupId}/events`, {
+        event_id: crypto.randomUUID(),
+        type: isEdit ? 'settlement.updated' : 'settlement.created',
+        payload: { ...payload, updated_at: Date.now() },
+      })
+      await pull()
+    } catch (err) {
+      setError(err.message)
+      throw err
+    }
+  }
+  const recordSettlement = (from, to, amount_cents) =>
+    appendSettlement(
+      {
+        settlement_id: crypto.randomUUID(),
+        from,
+        to,
+        amount_cents,
+        date: new Date().toISOString().slice(0, 10),
+        deleted: false,
+      },
+      false
+    )
+  const editSettlement = (s, amount_cents) =>
+    appendSettlement(
+      { settlement_id: s.settlement_id, from: s.from, to: s.to, amount_cents, date: s.date, deleted: false },
+      true
+    )
+  const deleteSettlement = (s) =>
+    appendSettlement(
+      { settlement_id: s.settlement_id, from: s.from, to: s.to, amount_cents: s.amount_cents, date: s.date, deleted: true },
+      true
+    )
+
   if (!meta) return null
 
   return (
@@ -333,6 +373,9 @@ function GroupView({ groupId, me, onBack }) {
           </li>
         ))}
       </ul>
+
+      <h3>Settle up</h3>
+      <SettleUp suggestions={suggestions} onRecord={recordSettlement} />
 
       {state.members.length > 0 && (
         <ExpenseForm
@@ -389,6 +432,14 @@ function GroupView({ groupId, me, onBack }) {
           </li>
         ))}
       </ul>
+
+      <h3>Payments</h3>
+      <Payments
+        payments={state.payments}
+        meId={meId}
+        onEdit={editSettlement}
+        onDelete={deleteSettlement}
+      />
       {error && <p className="error">{error}</p>}
     </section>
   )
@@ -397,6 +448,164 @@ function GroupView({ groupId, me, onBack }) {
 function memberIdFor(members, me) {
   const mine = members.find((m) => m.username === me.username)
   return (mine || members[0])?.id
+}
+
+// Suggested minimal transfers. One click opens an editable amount (prefilled
+// with the suggested default); confirm records it as a settlement.
+function SettleUp({ suggestions, onRecord }) {
+  const [activeKey, setActiveKey] = useState(null)
+  const [amount, setAmount] = useState('')
+  const [error, setError] = useState('')
+
+  async function confirm(t) {
+    const cents = Math.round(parseFloat(amount) * 100)
+    if (!cents || cents <= 0) return setError('Enter a positive amount')
+    try {
+      await onRecord(t.from, t.to, cents)
+      setActiveKey(null)
+      setError('')
+    } catch {
+      // error is surfaced by the parent
+    }
+  }
+
+  if (!suggestions.length) {
+    return <p className="muted">Everyone is settled up 🎉</p>
+  }
+  return (
+    <>
+      <ul className="list">
+        {suggestions.map((t) => {
+          const key = `${t.from}-${t.to}`
+          return (
+            <li key={key} className="row static">
+              <span>
+                {t.from_name} → {t.to_name}
+              </span>
+              {activeKey === key ? (
+                <span className="settle-edit">
+                  <input
+                    className="pay-amt"
+                    inputMode="decimal"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                  />
+                  <button type="button" className="link" onClick={() => confirm(t)}>
+                    confirm
+                  </button>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => setActiveKey(null)}
+                  >
+                    cancel
+                  </button>
+                </span>
+              ) : (
+                <button
+                  className="link"
+                  onClick={() => {
+                    setActiveKey(key)
+                    setAmount((t.amount_cents / 100).toFixed(2))
+                    setError('')
+                  }}
+                >
+                  {money(t.amount_cents)} · settle
+                </button>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {error && <p className="error">{error}</p>}
+    </>
+  )
+}
+
+// Recorded payments. Only the member who initiated one may edit or delete it.
+function Payments({ payments, meId, onEdit, onDelete }) {
+  const [editId, setEditId] = useState(null)
+  const [amount, setAmount] = useState('')
+  const [error, setError] = useState('')
+
+  if (!payments.length) return <p className="muted">No payments yet.</p>
+  return (
+    <>
+      <ul className="list">
+        {payments.map((s) => {
+          const mine = s.initiator === meId
+          const active = editId === s.settlement_id
+          return (
+            <li key={s.settlement_id} className="row static">
+              <div className="expense">
+                <span>
+                  {s.from_name} paid {s.to_name} {money(s.amount_cents)}
+                </span>
+                <span className="muted">{s.date}</span>
+              </div>
+              {mine &&
+                (active ? (
+                  <span className="settle-edit">
+                    <input
+                      className="pay-amt"
+                      inputMode="decimal"
+                      value={amount}
+                      onChange={(e) => setAmount(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={async () => {
+                        const cents = Math.round(parseFloat(amount) * 100)
+                        if (!cents || cents <= 0) {
+                          return setError('Enter a positive amount')
+                        }
+                        try {
+                          await onEdit(s, cents)
+                          setEditId(null)
+                          setError('')
+                        } catch {
+                          // surfaced by parent
+                        }
+                      }}
+                    >
+                      save
+                    </button>
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => setEditId(null)}
+                    >
+                      cancel
+                    </button>
+                  </span>
+                ) : (
+                  <div className="row-actions">
+                    <button
+                      className="link"
+                      onClick={() => {
+                        setEditId(s.settlement_id)
+                        setAmount((s.amount_cents / 100).toFixed(2))
+                        setError('')
+                      }}
+                    >
+                      edit
+                    </button>
+                    <button
+                      className="link danger"
+                      onClick={() => onDelete(s)}
+                    >
+                      delete
+                    </button>
+                  </div>
+                ))}
+            </li>
+          )
+        })}
+      </ul>
+      {error && <p className="error">{error}</p>}
+    </>
+  )
 }
 
 function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {

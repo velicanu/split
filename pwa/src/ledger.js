@@ -23,6 +23,8 @@ export function computeState(events) {
   // with the same expense_id; the latest one wins (append order is the total
   // order). Both payers and splits are frozen per revision.
   const latest = {}
+  // settlement_id -> { ev: latest revision, initiator: author of the create }
+  const settle = {}
 
   for (const e of events) {
     if (e.type === 'member.added') {
@@ -39,6 +41,18 @@ export function computeState(events) {
       if (!Array.isArray(p.payers) || !Array.isArray(p.splits)) continue
       const prev = latest[p.expense_id]
       if (!prev || e.id > prev.id) latest[p.expense_id] = e
+    } else if (
+      e.type === 'settlement.created' ||
+      e.type === 'settlement.updated'
+    ) {
+      const p = e.payload
+      if (!p || !p.settlement_id) continue
+      // events arrive in ascending id, so the first seen is the create — its
+      // author is the initiator, who alone may edit/delete the payment.
+      const cur = settle[p.settlement_id]
+      if (!cur) settle[p.settlement_id] = { ev: e, initiator: e.author }
+      else if (e.id > cur.ev.id)
+        settle[p.settlement_id] = { ev: e, initiator: cur.initiator }
     }
   }
 
@@ -59,6 +73,8 @@ export function computeState(events) {
     }
   })
 
+  const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
+
   const paid = {}
   const owed = {}
   for (const uid of memberIds) {
@@ -75,7 +91,25 @@ export function computeState(events) {
     }
   }
 
-  const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
+  const settlements = Object.values(settle).map(({ ev, initiator }) => ({
+    id: ev.id,
+    settlement_id: ev.payload.settlement_id,
+    from: ev.payload.from,
+    to: ev.payload.to,
+    amount_cents: ev.payload.amount_cents,
+    date: ev.payload.date || '',
+    deleted: !!ev.payload.deleted,
+    initiator,
+  }))
+  // A payment moves money: the payer's net rises, the receiver's falls.
+  for (const s of settlements) {
+    if (s.deleted) continue
+    if (s.from in paid) paid[s.from] += s.amount_cents
+    if (s.to in paid) paid[s.to] -= s.amount_cents
+  }
+
+  const byDateDesc = (a, b) =>
+    a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1
   const balances = members.map((m) => ({
     user_id: m.id,
     username: m.username,
@@ -87,7 +121,49 @@ export function computeState(events) {
       payer_names: x.payers.map((p) => nameById[p.user_id] || '?'),
       ways: x.splits.length,
     }))
-    .sort((a, b) => (a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1))
+    .sort(byDateDesc)
+  const payments = settlements
+    .filter((s) => !s.deleted)
+    .map((s) => ({
+      ...s,
+      from_name: nameById[s.from] || '?',
+      to_name: nameById[s.to] || '?',
+    }))
+    .sort(byDateDesc)
 
-  return { members, balances, ledger }
+  return { members, balances, ledger, payments }
+}
+
+// Deterministic greedy min-cash-flow: repeatedly match the biggest debtor with
+// the biggest creditor until everyone nets to zero. Every client folds the same
+// balances and sorts with a stable user_id tiebreak, so all clients suggest the
+// identical payments. Near-minimal (true minimum is NP-hard), which is fine.
+export function simplify(balances) {
+  const debtors = balances
+    .filter((b) => b.net_cents < 0)
+    .map((b) => ({ id: b.user_id, name: b.username, net: b.net_cents }))
+    .sort((a, b) => a.net - b.net || a.id - b.id)
+  const creditors = balances
+    .filter((b) => b.net_cents > 0)
+    .map((b) => ({ id: b.user_id, name: b.username, net: b.net_cents }))
+    .sort((a, b) => b.net - a.net || a.id - b.id)
+
+  const transfers = []
+  let i = 0
+  let j = 0
+  while (i < debtors.length && j < creditors.length) {
+    const amt = Math.min(-debtors[i].net, creditors[j].net)
+    transfers.push({
+      from: debtors[i].id,
+      from_name: debtors[i].name,
+      to: creditors[j].id,
+      to_name: creditors[j].name,
+      amount_cents: amt,
+    })
+    debtors[i].net += amt
+    creditors[j].net -= amt
+    if (debtors[i].net === 0) i += 1
+    if (creditors[j].net === 0) j += 1
+  }
+  return transfers
 }
