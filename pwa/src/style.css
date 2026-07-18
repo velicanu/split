@@ -1,0 +1,44 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+main {
+  text-align: center;
+  padding: 2rem;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 240px;
+  margin: 0 auto;
+}
+
+input {
+  padding: 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+
+button {
+  padding: 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: #16a34a;
+  color: white;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.error {
+  color: #dc2626;
+}
