@@ -366,7 +366,11 @@ function GroupView({ groupId, me, onBack }) {
               </span>
             </div>
             <div className="row-actions">
-              <button className="link" onClick={() => setEditing(x)}>
+              <button
+                className="link"
+                onClick={() => setEditing(x)}
+                disabled={x.deleted}
+              >
                 edit
               </button>
               {x.deleted ? (
