@@ -20,6 +20,7 @@ import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
+import { loadAiSettings, saveApiKey } from './aikeys'
 
 
 const money = (cents) =>
@@ -177,9 +178,11 @@ function Home({ user, onLogout }) {
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
 
+  // Keys arrive sealed and are opened here; the server never held a readable
+  // copy to send.
   const loadAi = useCallback(
     () =>
-      api('ai/settings')
+      loadAiSettings()
         .then(setAi)
         .catch(() => {}),
     []
@@ -276,7 +279,7 @@ function Settings({ ai, user, onChanged, onClose }) {
   }
   const saveKey = (id) =>
     run(async () => {
-      await api(`ai/providers/${id}`, { api_key: drafts[id] }, 'PUT')
+      await saveApiKey(id, drafts[id].trim())
       setDrafts((d) => ({ ...d, [id]: '' }))
     })
   const chooseModel = (id, model) =>
@@ -307,7 +310,21 @@ function Settings({ ai, user, onChanged, onClose }) {
             </legend>
             {saved ? (
               <>
-                <p className="muted">key saved ({maskKey(saved.api_key)})</p>
+                {saved.api_key ? (
+                  <p className="muted">
+                    key saved ({maskKey(saved.api_key)}) · readable on this
+                    device only
+                  </p>
+                ) : (
+                  // The account has a key but this device cannot open it —
+                  // it enrolled before the key was saved. Say so plainly
+                  // rather than showing an empty box that looks like no key.
+                  <p className="error">
+                    A key is saved on your account, but this device can&rsquo;t
+                    read it. Paste it again here, or sign in on the device that
+                    has it.
+                  </p>
+                )}
                 <label className="field">
                   model
                   <select

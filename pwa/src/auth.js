@@ -9,6 +9,7 @@
 // The server never sees a password or any private key. See plan/11.
 
 import { api } from './api'
+import { adoptApiKeysForNewDevice } from './aikeys'
 import { adoptGroupsForNewDevice, forgetGroupKeys } from './groupkeys'
 import {
   forgetDeviceKey,
@@ -102,9 +103,10 @@ export async function enrol({ login_handle, password }) {
   })
   await saveDeviceKey(device)
   await authenticate(device)
-  // The account copy of each group key is the only one this browser can open,
-  // so re-seal them to the new device key before dropping the account key.
+  // The account copies are the only ones this browser can open, so re-seal
+  // them to the new device key before the account key is dropped.
   await adoptGroupsForNewDevice(account)
+  await adoptApiKeysForNewDevice(account)
   return api('me')
 }
 
