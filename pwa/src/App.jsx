@@ -13,7 +13,7 @@ import {
   splitByWeights,
   splitEqually,
 } from './ledger'
-import { PROVIDERS, extractReceipt } from './ai'
+import { PROVIDERS, extractReceipt, prepareImage } from './ai'
 
 async function api(path, body, method) {
   const res = await fetch(`/api/${path}`, {
@@ -635,6 +635,7 @@ function GroupView({ groupId, me, ai, onBack }) {
       {state.members.length > 0 && (
         <ExpenseForm
           key={editing?.expense_id || 'new'}
+          groupId={groupId}
           members={state.members}
           me={me}
           ai={ai}
@@ -763,6 +764,28 @@ function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDele
             ? ` · by ${expense.split.mode}`
             : ''}
         </p>
+
+        {expense.receipts?.length > 0 && (
+          <>
+            <h4>Receipts</h4>
+            <div className="receipt-strip">
+              {expense.receipts.map((rid) => (
+                <a
+                  key={rid}
+                  href={`/api/receipts/${rid}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <img
+                    className="receipt-thumb"
+                    src={`/api/receipts/${rid}`}
+                    alt="receipt"
+                  />
+                </a>
+              ))}
+            </div>
+          </>
+        )}
 
         <h4>Paid</h4>
         <ul className="list">
@@ -1153,8 +1176,21 @@ function Payments({ payments, onEdit, onDelete }) {
   )
 }
 
-export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
+export function ExpenseForm({
+  groupId,
+  members,
+  me,
+  ai,
+  initial,
+  onSubmit,
+  onCancel,
+}) {
   const [scanning, setScanning] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  // Ids of receipt images attached to this expense. Uploading is independent of
+  // scanning: no API key is needed to keep a photo of the receipt, and a stored
+  // receipt can be scanned later, or scanned again.
+  const [receipts, setReceipts] = useState(() => initial?.receipts ?? [])
   const today = new Date().toISOString().slice(0, 10)
   const [description, setDescription] = useState(initial?.description ?? '')
   const [amount, setAmount] = useState(
@@ -1244,11 +1280,9 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
   }
 
   // Scanned output is a *draft*: it fills the editable rows so the user can
-  // fix OCR mistakes before anything is saved.
-  async function scan(e) {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
+  // fix OCR mistakes before anything is saved. Takes any image source, so the
+  // same path serves a fresh photo and a re-scan of a stored one.
+  async function runScan(image) {
     const config = ai?.providers?.[ai.active]
     if (!config) return
     setScanning(true)
@@ -1259,7 +1293,7 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         provider: ai.active,
         apiKey: config.api_key,
         model: config.model,
-        file,
+        file: image,
       })
       // Items that don't reconcile with the printed subtotal mean something
       // was misread, so let the user look before it touches the form.
@@ -1270,6 +1304,61 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
       setError(err.message)
     } finally {
       setScanning(false)
+    }
+  }
+
+  // Stored at the size we'd display it, which is also the size we'd send to a
+  // model — a full-resolution phone photo is wasted bytes for a receipt.
+  async function upload(file) {
+    const { dataUrl } = await prepareImage(file)
+    const { receipt_id } = await api(`groups/${groupId}/receipts`, {
+      data_url: dataUrl,
+    })
+    setReceipts((prev) => [...prev, receipt_id])
+  }
+
+  const pick = (handler) => async (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (file) await handler(file)
+  }
+
+  const attach = pick(async (file) => {
+    setUploading(true)
+    setError('')
+    try {
+      await upload(file)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUploading(false)
+    }
+  })
+
+  // Attach and scan in one go. If the upload fails the scan is skipped, so a
+  // failure means nothing happened rather than a scan with no receipt kept.
+  const scanNew = pick(async (file) => {
+    setUploading(true)
+    setError('')
+    try {
+      await upload(file)
+    } catch (err) {
+      setError(err.message)
+      return
+    } finally {
+      setUploading(false)
+    }
+    await runScan(file)
+  })
+
+  async function rescan(receiptId) {
+    setError('')
+    try {
+      const res = await fetch(`/api/receipts/${receiptId}`)
+      if (!res.ok) throw new Error("Couldn't load that receipt")
+      await runScan(await res.blob())
+    } catch (err) {
+      setError(err.message)
     }
   }
 
@@ -1388,6 +1477,7 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
           split,
           date,
           category: category.trim(),
+          receipts,
           deleted: initial?.deleted ?? false,
           updated_at: Date.now(),
         },
@@ -1485,22 +1575,72 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         </select>
       </label>
 
-      {/* Scanning is how you'd *start* an expense, so it can't be hidden
-          behind picking the items mode first — a successful scan switches
-          the mode itself. */}
+      {/* Keeping the receipt needs no API key. Scanning is a separate,
+          optional step on top — and either one can start an expense, so
+          neither is hidden behind picking a split mode first. */}
+      <label className="scan">
+        {uploading ? 'uploading…' : '📎 add a receipt'}
+        <input
+          type="file"
+          accept="image/*"
+          capture="environment"
+          disabled={uploading || scanning}
+          onChange={attach}
+        />
+      </label>
       {ai?.active && (
         <label className="scan">
           {scanning
             ? 'scanning…'
-            : `📷 scan a receipt with ${PROVIDERS[ai.active]?.label ?? ai.active}`}
+            : uploading
+              ? 'uploading…'
+              : `📷 add and scan with ${PROVIDERS[ai.active]?.label ?? ai.active}`}
           <input
             type="file"
             accept="image/*"
             capture="environment"
-            disabled={scanning}
-            onChange={scan}
+            disabled={uploading || scanning}
+            onChange={scanNew}
           />
         </label>
+      )}
+
+      {receipts.length > 0 && (
+        <fieldset className="participants receipt">
+          <legend>receipts</legend>
+          {receipts.map((rid) => (
+            <div key={rid} className="receipt-row">
+              <a href={`/api/receipts/${rid}`} target="_blank" rel="noreferrer">
+                <img
+                  className="receipt-thumb"
+                  src={`/api/receipts/${rid}`}
+                  alt="receipt"
+                />
+              </a>
+              <div className="row-actions">
+                {ai?.active && (
+                  <button
+                    type="button"
+                    className="link"
+                    disabled={scanning}
+                    onClick={() => rescan(rid)}
+                  >
+                    {scanning ? 'scanning…' : 'scan'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="link danger"
+                  onClick={() =>
+                    setReceipts((prev) => prev.filter((id) => id !== rid))
+                  }
+                >
+                  remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </fieldset>
       )}
 
       {pending && (

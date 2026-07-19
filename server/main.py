@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hmac
 import json
 import os
@@ -66,6 +68,20 @@ def init_db():
         # provider: with no rows the feature is simply unavailable. Adding a key
         # or explicitly switching sets active=1 (and clears the others), so the
         # latest add-or-select wins. Keys are stored in the clear for now.
+        # Receipt images. Deliberately dumb: bytes in a blob beside everything
+        # else, so it rides the existing volume and backup. The event log only
+        # ever carries a receipt id — images must never bloat the ledger, which
+        # every client replicates in full. Moving these client-side is the next
+        # change, so nothing here is built to last.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS receipts ("
+            " id TEXT PRIMARY KEY,"
+            " group_id INTEGER NOT NULL REFERENCES groups(id),"
+            " uploader INTEGER NOT NULL REFERENCES users(id),"
+            " content_type TEXT NOT NULL,"
+            " bytes BLOB NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ai_providers ("
             " user_id INTEGER NOT NULL REFERENCES users(id),"
@@ -107,6 +123,10 @@ class EventIn(BaseModel):
 
 # Cheapest vision-capable model per provider — the default when a key is added.
 DEFAULT_MODELS = {"anthropic": "claude-haiku-4-5", "openai": "gpt-5.4-nano"}
+
+
+class ReceiptIn(BaseModel):
+    data_url: str
 
 
 class ProviderIn(BaseModel):
@@ -364,6 +384,65 @@ def get_events(group_id: int, request: Request, since: int = 0):
         e["payload"] = json.loads(e["payload"])
         events.append(e)
     return {"version": version, "events": events}
+
+
+# Raster only, and served with nosniff below: an uploaded SVG rendered from our
+# own origin would be stored XSS.
+RECEIPT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_RECEIPT_BYTES = 5 * 1024 * 1024
+
+
+@app.post("/api/groups/{group_id}/receipts")
+def upload_receipt(group_id: int, body: ReceiptIn, request: Request):
+    """Store a receipt image and hand back its id. The id is what goes in the
+    expense event; the bytes never enter the log."""
+    user = require_user(request)
+    head, _, encoded = body.data_url.partition(",")
+    if not head.startswith("data:") or ";base64" not in head:
+        raise HTTPException(400, "expected a base64 data URL")
+    content_type = head[len("data:") :].split(";")[0]
+    if content_type not in RECEIPT_TYPES:
+        raise HTTPException(400, f"unsupported image type {content_type}")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(400, "image is not valid base64") from None
+    if not raw:
+        raise HTTPException(400, "image is empty")
+    if len(raw) > MAX_RECEIPT_BYTES:
+        raise HTTPException(413, "image is too large")
+
+    receipt_id = secrets.token_urlsafe(16)
+    with db() as conn:
+        require_member(conn, group_id, user["id"])
+        conn.execute(
+            "INSERT INTO receipts (id, group_id, uploader, content_type, bytes)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (receipt_id, group_id, user["id"], content_type, raw),
+        )
+    return {"receipt_id": receipt_id}
+
+
+@app.get("/api/receipts/{receipt_id}")
+def get_receipt(receipt_id: str, request: Request):
+    user = require_user(request)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT group_id, content_type, bytes FROM receipts WHERE id = ?",
+            (receipt_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "receipt not found")
+        # Anyone in the group can see it; nobody outside can.
+        require_member(conn, row["group_id"], user["id"])
+    return Response(
+        content=row["bytes"],
+        media_type=row["content_type"],
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=31536000, immutable",
+        },
+    )
 
 
 @app.post("/api/groups/{group_id}/events")

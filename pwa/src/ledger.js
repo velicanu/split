@@ -122,6 +122,9 @@ export function computeState(events) {
       split: p.split || null,
       date: p.date || '',
       category: p.category || '',
+      // Ids of receipt images, never the images themselves — the log is
+      // replicated to every client and must stay small.
+      receipts: Array.isArray(p.receipts) ? p.receipts : [],
       // Soft delete: the row stays in the log with its data intact so it can
       // be shown struck-through and restored; it just stops counting.
       deleted: !!p.deleted,
