@@ -213,6 +213,44 @@ export async function decryptPayload(groupKeyB64, blob) {
   return JSON.parse(sodium.to_string(plain))
 }
 
+// --- binary blobs (receipt images) -------------------------------------
+
+/** BLAKE2b-256, hex. Matches Python's hashlib.blake2b(digest_size=32) so the
+ *  server can verify that a blob really is what it is called. */
+export async function contentId(bytes) {
+  await ready
+  return sodium.to_hex(sodium.crypto_generichash(32, bytes))
+}
+
+/** Encrypt raw bytes under the group key; the nonce is prepended. Separate
+ *  from encryptPayload because images are bytes, not JSON, and base64ing them
+ *  through the JSON path would inflate every upload by a third. */
+export async function encryptBytes(groupKeyB64, bytes) {
+  await ready
+  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES)
+  const sealed = sodium.crypto_secretbox_easy(bytes, nonce, unb64(groupKeyB64))
+  const out = new Uint8Array(nonce.length + sealed.length)
+  out.set(nonce)
+  out.set(sealed, nonce.length)
+  return out
+}
+
+export async function decryptBytes(groupKeyB64, blob) {
+  await ready
+  const bytes = new Uint8Array(blob)
+  const n = sodium.crypto_secretbox_NONCEBYTES
+  if (bytes.length <= n) throw new Error('Malformed receipt')
+  try {
+    return sodium.crypto_secretbox_open_easy(
+      bytes.slice(n),
+      bytes.slice(0, n),
+      unb64(groupKeyB64)
+    )
+  } catch {
+    throw new Error('Could not decrypt')
+  }
+}
+
 export async function unwrapAccountKey(wrap, password) {
   await ready
   const params = JSON.parse(wrap.params)

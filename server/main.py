@@ -1,5 +1,6 @@
 import base64
 import binascii
+import hashlib
 import json
 import os
 import secrets
@@ -26,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def reset_if_stale(conn):
@@ -155,19 +156,25 @@ def init_db():
         # provider: with no rows the feature is simply unavailable. Adding a key
         # or explicitly switching sets active=1 (and clears the others), so the
         # latest add-or-select wins. Keys are stored in the clear for now.
-        # Receipt images. Deliberately dumb: bytes in a blob beside everything
-        # else, so it rides the existing volume and backup. The event log only
-        # ever carries a receipt id — images must never bloat the ledger, which
-        # every client replicates in full. Moving these client-side is the next
-        # change, so nothing here is built to last.
+        # Receipt images, encrypted client-side under the group key. The server
+        # stores ciphertext and has no idea what any of it depicts — there is no
+        # content type here because it cannot know one.
+        #
+        # `id` is the BLAKE2b-256 hash of the ciphertext, so storage is
+        # content-addressed: the server cannot substitute one blob for another
+        # without the client noticing, and a repeated upload is a no-op.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS receipts ("
-            " id TEXT PRIMARY KEY,"
             " group_id INTEGER NOT NULL REFERENCES groups(id),"
+            " id TEXT NOT NULL,"
             " uploader INTEGER NOT NULL REFERENCES users(id),"
-            " content_type TEXT NOT NULL,"
             " bytes BLOB NOT NULL,"
-            " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+            # Keyed by group as well as content: an id says what a blob *is*,
+            # not who may read it. Two groups uploading identical bytes must
+            # not end up sharing one row whose access is decided by whichever
+            # got there first.
+            " PRIMARY KEY (group_id, id))"
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ai_providers ("
@@ -253,7 +260,8 @@ DEFAULT_MODELS = {"anthropic": "claude-haiku-4-5", "openai": "gpt-5.4-nano"}
 
 
 class ReceiptIn(BaseModel):
-    data_url: str
+    receipt_id: str
+    ciphertext: str
 
 
 class ProviderIn(BaseModel):
@@ -750,58 +758,65 @@ def my_box_key(request: Request):
     return {"account_box_pubkey": row["account_box_pubkey"]}
 
 
-# Raster only, and served with nosniff below: an uploaded SVG rendered from our
-# own origin would be stored XSS.
-RECEIPT_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_RECEIPT_BYTES = 5 * 1024 * 1024
+MAX_RECEIPT_BYTES = 8 * 1024 * 1024
+
+
+def content_id(raw: bytes) -> str:
+    """BLAKE2b-256, matching libsodium's crypto_generichash at 32 bytes so the
+    client and server agree on what a blob is called."""
+    return hashlib.blake2b(raw, digest_size=32).hexdigest()
 
 
 @app.post("/api/groups/{group_id}/receipts")
 def upload_receipt(group_id: int, body: ReceiptIn, request: Request):
-    """Store a receipt image and hand back its id. The id is what goes in the
-    expense event; the bytes never enter the log."""
-    user = require_user(request)
-    head, _, encoded = body.data_url.partition(",")
-    if not head.startswith("data:") or ";base64" not in head:
-        raise HTTPException(400, "expected a base64 data URL")
-    content_type = head[len("data:") :].split(";")[0]
-    if content_type not in RECEIPT_TYPES:
-        raise HTTPException(400, f"unsupported image type {content_type}")
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (ValueError, binascii.Error):
-        raise HTTPException(400, "image is not valid base64") from None
-    if not raw:
-        raise HTTPException(400, "image is empty")
-    if len(raw) > MAX_RECEIPT_BYTES:
-        raise HTTPException(413, "image is too large")
+    """Store an encrypted receipt under its content hash.
 
-    receipt_id = secrets.token_urlsafe(16)
+    The bytes are ciphertext; there is nothing here to validate about the image
+    because the server cannot see one. What it *can* check is that the id is
+    genuinely the hash of what was sent, which is what makes the address
+    trustworthy for everyone who later fetches it."""
+    user = require_user(request)
+    try:
+        raw = base64.b64decode(body.ciphertext, validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(400, "not valid base64") from None
+    if not raw:
+        raise HTTPException(400, "receipt is empty")
+    if len(raw) > MAX_RECEIPT_BYTES:
+        raise HTTPException(413, "receipt is too large")
+    if body.receipt_id != content_id(raw):
+        raise HTTPException(400, "receipt id is not the hash of the content")
+
     with db() as conn:
         require_member(conn, group_id, user["id"])
+        # Content-addressed, so re-uploading the same blob is a no-op rather
+        # than a conflict.
         conn.execute(
-            "INSERT INTO receipts (id, group_id, uploader, content_type, bytes)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (receipt_id, group_id, user["id"], content_type, raw),
+            "INSERT OR IGNORE INTO receipts (group_id, id, uploader, bytes)"
+            " VALUES (?, ?, ?, ?)",
+            (group_id, body.receipt_id, user["id"], raw),
         )
-    return {"receipt_id": receipt_id}
+    return {"receipt_id": body.receipt_id}
 
 
-@app.get("/api/receipts/{receipt_id}")
-def get_receipt(receipt_id: str, request: Request):
+@app.get("/api/groups/{group_id}/receipts/{receipt_id}")
+def get_receipt(group_id: int, receipt_id: str, request: Request):
     user = require_user(request)
     with db() as conn:
+        # Membership first: whether a given blob exists is itself information.
+        require_member(conn, group_id, user["id"])
         row = conn.execute(
-            "SELECT group_id, content_type, bytes FROM receipts WHERE id = ?",
-            (receipt_id,),
+            "SELECT bytes FROM receipts WHERE group_id = ? AND id = ?",
+            (group_id, receipt_id),
         ).fetchone()
         if not row:
             raise HTTPException(404, "receipt not found")
-        # Anyone in the group can see it; nobody outside can.
-        require_member(conn, row["group_id"], user["id"])
     return Response(
         content=row["bytes"],
-        media_type=row["content_type"],
+        # Opaque bytes, never rendered by the browser: the client decrypts and
+        # decides how to display. That also retires the stored-XSS worry that
+        # came with serving user content under an image type.
+        media_type="application/octet-stream",
         headers={
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "private, max-age=31536000, immutable",

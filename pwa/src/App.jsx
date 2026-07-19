@@ -13,12 +13,13 @@ import {
   splitByWeights,
   splitEqually,
 } from './ledger'
-import { PROVIDERS, extractReceipt, prepareImage } from './ai'
+import { PROVIDERS, extractReceipt } from './ai'
 import { api } from './api'
 import { changePassword, enrol, logout as signOut, resume, signup } from './auth'
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
+import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
 
 
 const money = (cents) =>
@@ -544,6 +545,33 @@ function InviteLink({ groupId, code }) {
   )
 }
 
+// Receipts are ciphertext on the server, so a plain <img src> would render
+// nothing. Fetch, verify against the content hash, decrypt, then show.
+function ReceiptThumb({ groupId, receiptId }) {
+  const [url, setUrl] = useState('')
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    receiptUrl(groupId, receiptId)
+      .then((u) => !cancelled && setUrl(u))
+      .catch(() => !cancelled && setFailed(true))
+    return () => {
+      cancelled = true
+    }
+  }, [groupId, receiptId])
+
+  if (failed) {
+    return <span className="receipt-thumb muted">unreadable</span>
+  }
+  if (!url) return <span className="receipt-thumb" />
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      <img className="receipt-thumb" src={url} alt="receipt" />
+    </a>
+  )
+}
+
 function GroupList({ onOpen }) {
   const [groups, setGroups] = useState(null)
   const [name, setName] = useState('')
@@ -954,6 +982,7 @@ export function GroupView({ groupId, me, ai, onBack }) {
 
       {viewing && (
         <ExpenseDetail
+          groupId={groupId}
           expense={viewing}
           members={state.members}
           meId={meId}
@@ -979,6 +1008,7 @@ export function GroupView({ groupId, me, ai, onBack }) {
 // Detail overlay for one expense: per-person paid/owed, plus comments (anyone
 // can post; you may edit/delete your own).
 function ExpenseDetail({
+  groupId,
   expense,
   members,
   meId,
@@ -1040,17 +1070,7 @@ function ExpenseDetail({
             <div className="receipt-strip">
               {expense.receipts.map((rid) => (
                 <div key={rid} className="receipt-cell">
-                  <a
-                    href={`/api/receipts/${rid}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <img
-                      className="receipt-thumb"
-                      src={`/api/receipts/${rid}`}
-                      alt="receipt"
-                    />
-                  </a>
+                  <ReceiptThumb groupId={groupId} receiptId={rid} />
                   {/* Re-reading a receipt belongs with the receipt, on the
                       expense it's attached to — not on the add form, which
                       has no business holding one past creation. */}
@@ -1595,11 +1615,8 @@ export function ExpenseForm({
   // Stored at the size we'd display it, which is also the size we'd send to a
   // model — a full-resolution phone photo is wasted bytes for a receipt.
   async function upload(file) {
-    const { dataUrl } = await prepareImage(file)
-    const { receipt_id } = await api(`groups/${groupId}/receipts`, {
-      data_url: dataUrl,
-    })
-    setReceipts((prev) => [...prev, receipt_id])
+    const id = await uploadReceipt(groupId, file)
+    setReceipts((prev) => [...prev, id])
   }
 
   const pick = (handler) => async (e) => {
@@ -1639,9 +1656,7 @@ export function ExpenseForm({
   async function rescan(receiptId) {
     setError('')
     try {
-      const res = await fetch(`/api/receipts/${receiptId}`)
-      if (!res.ok) throw new Error("Couldn't load that receipt")
-      await runScan(await res.blob())
+      await runScan(await receiptBlob(groupId, receiptId))
     } catch (err) {
       setError(err.message)
     }
@@ -1905,13 +1920,7 @@ export function ExpenseForm({
           <legend>receipts</legend>
           {receipts.map((rid) => (
             <div key={rid} className="receipt-row">
-              <a href={`/api/receipts/${rid}`} target="_blank" rel="noreferrer">
-                <img
-                  className="receipt-thumb"
-                  src={`/api/receipts/${rid}`}
-                  alt="receipt"
-                />
-              </a>
+              <ReceiptThumb groupId={groupId} receiptId={rid} />
               {/* No scan button here: re-reading a receipt lives on the
                   expense's detail view, once there's an expense to attach
                   the result to. */}

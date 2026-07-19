@@ -6,6 +6,16 @@ import { beforeEach, describe, test } from 'node:test'
 
 import { ExpenseForm } from '../src/App.jsx'
 import {
+  contentId,
+  encryptBytes,
+  generateDeviceKey,
+  generateGroupKey,
+  saveDeviceKey,
+  sealTo,
+} from '../src/crypto.js'
+import { forgetGroupKeys } from '../src/groupkeys.js'
+import { forgetReceipts } from '../src/receipts.js'
+import {
   $,
   $$,
   byText,
@@ -55,20 +65,58 @@ const reply = ({ subtotal, total }) => ({
 // and asking the model to read one. Records what was uploaded so tests can
 // assert an image was kept even when no scan ran.
 let uploaded
-function serve({ subtotal = 3000, total = 3850, uploadFails = false } = {}) {
+let stored
+// Receipts are encrypted under the group key now, so the fake has to hold one
+// and this browser needs a device key to open it with.
+async function serve({ subtotal = 3000, total = 3850, uploadFails = false } = {}) {
   uploaded = []
+  forgetGroupKeys()
+  forgetReceipts()
+  const device = await generateDeviceKey()
+  await saveDeviceKey(device)
+  const key = await generateGroupKey()
+  const sealedKey = await sealTo(device.box_pubkey, key)
+  const blobs = new Map()
+
+  // A receipt already on the server, as if uploaded earlier — what a re-scan
+  // from the detail view reads.
+  const storedBytes = await encryptBytes(key, new Uint8Array([1, 2, 3, 4]))
+  stored = await contentId(storedBytes)
+  blobs.set(stored, storedBytes)
+
   globalThis.fetch = async (url, options) => {
     const path = String(url)
+    const body = options?.body ? JSON.parse(options.body) : null
+
+    if (path.endsWith('/keys')) {
+      if (body) return { ok: true, json: async () => ({ ok: true }) }
+      return {
+        ok: true,
+        json: async () => ({
+          keys: [
+            { recipient_kind: 'device', recipient_id: 'd1', ciphertext: sealedKey },
+          ],
+        }),
+      }
+    }
     if (path.endsWith('/receipts')) {
       if (uploadFails) {
         return { ok: false, status: 500, json: async () => ({ detail: 'disk full' }) }
       }
-      uploaded.push(JSON.parse(options.body).data_url)
-      return { ok: true, json: async () => ({ receipt_id: `r${uploaded.length}` }) }
+      const bytes = Uint8Array.from(atob(body.ciphertext), (c) => c.charCodeAt(0))
+      if ((await contentId(bytes)) !== body.receipt_id) {
+        return { ok: false, status: 400, json: async () => ({ detail: 'bad id' }) }
+      }
+      blobs.set(body.receipt_id, bytes)
+      uploaded.push(body.receipt_id)
+      return { ok: true, json: async () => ({ receipt_id: body.receipt_id }) }
     }
-    // Fetching a stored receipt back, for a re-scan.
-    if (path.startsWith('/api/receipts/')) {
-      return { ok: true, blob: async () => ({ name: 'stored.jpg' }) }
+    // Fetching a stored receipt back, for a re-scan or to display it.
+    if (path.includes('/receipts/')) {
+      const id = path.split('/receipts/')[1]
+      const bytes = blobs.get(id)
+      if (!bytes) return { ok: false, status: 404, json: async () => ({}) }
+      return { ok: true, arrayBuffer: async () => bytes.buffer.slice(0) }
     }
     return reply({ subtotal, total })
   }
@@ -105,7 +153,7 @@ const field = (label) => byText('label', label)?.querySelector('input')
 
 describe('scanning a receipt that reconciles', () => {
   beforeEach(async () => {
-    serve()
+    await serve()
     await render()
     await pickReceipt()
   })
@@ -131,7 +179,7 @@ describe('scanning a receipt that reconciles', () => {
 describe('scanning a receipt whose items miss the subtotal', () => {
   beforeEach(async () => {
     // Items sum to $30 but the receipt says $35 — a line was misread.
-    serve({ subtotal: 3500, total: 4350 })
+    await serve({ subtotal: 3500, total: 4350 })
     await render()
     await pickReceipt()
   })
@@ -217,7 +265,7 @@ describe('scanning a receipt whose items miss the subtotal', () => {
 
 describe('saving a scanned receipt', () => {
   beforeEach(async () => {
-    serve()
+    await serve()
     await render()
     await pickReceipt()
     await change($('input'), 'Dinner')
@@ -258,7 +306,7 @@ describe('working out which member I am', () => {
     )
 
   test('defaults the payer to me by id, not by name', async () => {
-    serve()
+    await serve()
     saved = []
     await renderAs({ id: 2, display_name: 'dave' })
     await change($('input'), 'Lunch')
@@ -268,7 +316,7 @@ describe('working out which member I am', () => {
   })
 
   test('and picks the other Dave when that is who I am', async () => {
-    serve()
+    await serve()
     saved = []
     await renderAs({ id: 1, display_name: 'dave' })
     await change($('input'), 'Lunch')
@@ -282,7 +330,7 @@ describe('the receipt controls', () => {
   const NO_AI = { active: null, providers: {} }
 
   test('both are offered in every split mode when a key exists', async () => {
-    serve()
+    await serve()
     await render()
     for (const mode of ['equal', 'percentage', 'shares', 'items']) {
       await change($('select'), mode)
@@ -292,7 +340,7 @@ describe('the receipt controls', () => {
   })
 
   test('attaching is offered without a key; scanning is not', async () => {
-    serve()
+    await serve()
     await render(NO_AI)
     assert.ok(attachControl(), 'keeping a receipt must not need an API key')
     assert.equal(scanControl(), undefined)
@@ -301,14 +349,14 @@ describe('the receipt controls', () => {
 
 describe('attaching a receipt without scanning', () => {
   beforeEach(async () => {
-    serve()
+    await serve()
     await render()
     await pickAttachment()
   })
 
   test('uploads the image and shows it', () => {
     assert.equal(uploaded.length, 1)
-    assert.ok(uploaded[0].startsWith('data:image/jpeg;base64,'))
+    assert.match(uploaded[0], /^[0-9a-f]{64}$/, 'the id is a content hash')
     assert.equal(thumbs().length, 1)
   })
 
@@ -323,26 +371,26 @@ describe('attaching a receipt without scanning', () => {
     await change($('input'), 'Lunch')
     await change(amountField(), '20.00')
     await submit($('form'))
-    assert.deepEqual(saved[0].receipts, ['r1'])
+    assert.deepEqual(saved[0].receipts, uploaded)
   })
 })
 
 describe('attaching a receipt without an API key', () => {
   test('works end to end', async () => {
-    serve()
+    await serve()
     await render({ active: null, providers: {} })
     await pickAttachment()
     assert.equal(thumbs().length, 1)
     await change($('input'), 'Lunch')
     await change(amountField(), '20.00')
     await submit($('form'))
-    assert.deepEqual(saved[0].receipts, ['r1'])
+    assert.deepEqual(saved[0].receipts, uploaded)
   })
 })
 
 describe('scanning keeps the receipt too', () => {
   test('a one-shot scan uploads the image as well as reading it', async () => {
-    serve()
+    await serve()
     await render()
     await pickReceipt()
     assert.equal(uploaded.length, 1, 'the photo should be kept, not just read')
@@ -351,11 +399,11 @@ describe('scanning keeps the receipt too', () => {
 
     await change($('input'), 'Dinner')
     await submit($('form'))
-    assert.deepEqual(saved[0].receipts, ['r1'])
+    assert.deepEqual(saved[0].receipts, uploaded)
   })
 
   test('several receipts can be attached to one expense', async () => {
-    serve()
+    await serve()
     await render()
     await pickAttachment()
     await pickAttachment()
@@ -363,11 +411,12 @@ describe('scanning keeps the receipt too', () => {
     await change($('input'), 'Dinner')
     await change(amountField(), '20.00')
     await submit($('form'))
-    assert.deepEqual(saved[0].receipts, ['r1', 'r2'])
+    assert.deepEqual(saved[0].receipts, uploaded)
+    assert.equal(uploaded.length, 2)
   })
 
   test('a receipt can be removed again', async () => {
-    serve()
+    await serve()
     await render()
     await pickAttachment()
     await click(byText('button', 'remove'))
@@ -382,14 +431,14 @@ describe('scanning keeps the receipt too', () => {
 describe('re-scanning a stored receipt', () => {
   // Driven by the detail view, which opens the form with a receipt to read.
   test('reads the stored image without uploading it again', async () => {
-    serve()
+    await serve()
     await mount(
       <ExpenseForm
         groupId={7}
         members={MEMBERS}
         me={ME}
         ai={AI}
-        scanOnOpen="stored-1"
+        scanOnOpen={stored}
         onSubmit={(e) => saved.push(e)}
         onCancel={() => {}}
       />
@@ -400,7 +449,7 @@ describe('re-scanning a stored receipt', () => {
   })
 
   test('attaching alone never scans', async () => {
-    serve()
+    await serve()
     await render()
     await pickAttachment()
     assert.equal($('select').value, 'equal')
@@ -410,7 +459,7 @@ describe('re-scanning a stored receipt', () => {
 
 describe('an expense that already has receipts', () => {
   test('keeps them when edited', async () => {
-    serve()
+    await serve()
     await mount(
       <ExpenseForm
         groupId={7}
@@ -441,10 +490,12 @@ describe('an expense that already has receipts', () => {
 
 describe('failures', () => {
   test('a failed scan reports the error and changes nothing', async () => {
-    serve()
+    await serve()
     const ok = globalThis.fetch
+    // Only the model call fails; uploading and key fetching still work, so the
+    // receipt is kept even though reading it doesn't.
     globalThis.fetch = async (url, options) =>
-      String(url).endsWith('/receipts')
+      /\/(receipts|keys)$/.test(String(url))
         ? ok(url, options)
         : {
             ok: false,
@@ -461,7 +512,7 @@ describe('failures', () => {
   })
 
   test('a failed upload reports the error and skips the scan', async () => {
-    serve({ uploadFails: true })
+    await serve({ uploadFails: true })
     await render()
     await pickReceipt()
     assert.equal(thumbs().length, 0)
