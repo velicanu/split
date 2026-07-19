@@ -86,6 +86,11 @@ class Credentials(BaseModel):
     password: str
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class GroupCreate(BaseModel):
     name: str
 
@@ -188,6 +193,34 @@ def me(request: Request):
     if not user:
         raise HTTPException(401, "not logged in")
     return {"username": user["username"]}
+
+
+@app.post("/api/password")
+def change_password(body: PasswordChange, request: Request):
+    user = require_user(request)
+    if not body.new_password:
+        raise HTTPException(400, "new password required")
+    with db() as conn:
+        row = conn.execute(
+            "SELECT salt, pw_hash FROM users WHERE id = ?", (user["id"],)
+        ).fetchone()
+    if not hmac.compare_digest(
+        row["pw_hash"], hash_pw(body.current_password, row["salt"])
+    ):
+        raise HTTPException(401, "current password is incorrect")
+    salt = secrets.token_bytes(16)
+    keep = request.cookies.get(COOKIE)
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET salt = ?, pw_hash = ? WHERE id = ?",
+            (salt, hash_pw(body.new_password, salt), user["id"]),
+        )
+        # Changing the password signs out this account's other sessions.
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND token != ?",
+            (user["id"], keep),
+        )
+    return {"ok": True}
 
 
 def require_user(request: Request):
