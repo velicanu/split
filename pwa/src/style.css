@@ -231,6 +231,20 @@ input.pay-amt {
   margin-top: 0.3rem;
 }
 
+.scan {
+  display: block;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  padding: 0.6rem;
+  text-align: center;
+  color: #16a34a;
+  cursor: pointer;
+}
+
+.scan input {
+  display: none;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

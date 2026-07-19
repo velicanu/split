@@ -62,6 +62,19 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS events_group_id ON events (group_id, id)"
         )
+        # Per-user AI provider credentials. There is no built-in default
+        # provider: with no rows the feature is simply unavailable. Adding a key
+        # or explicitly switching sets active=1 (and clears the others), so the
+        # latest add-or-select wins. Keys are stored in the clear for now.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ai_providers ("
+            " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " provider TEXT NOT NULL,"
+            " api_key TEXT NOT NULL,"
+            " model TEXT NOT NULL,"
+            " active INTEGER NOT NULL DEFAULT 0,"
+            " PRIMARY KEY (user_id, provider))"
+        )
 
 
 def hash_pw(password: str, salt: bytes) -> bytes:
@@ -85,6 +98,19 @@ class EventIn(BaseModel):
     event_id: str
     type: str
     payload: dict = {}
+
+
+# Cheapest vision-capable model per provider — the default when a key is added.
+DEFAULT_MODELS = {"anthropic": "claude-haiku-4-5", "openai": "gpt-5.4-nano"}
+
+
+class ProviderIn(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+
+
+class ActiveIn(BaseModel):
+    provider: str
 
 
 app = FastAPI()
@@ -328,6 +354,118 @@ def post_event(group_id: int, body: EventIn, request: Request):
             conn, group_id, body.event_id, body.type, body.payload, user["id"]
         )
     return {"id": new_id}
+
+
+def require_provider(provider: str) -> str:
+    if provider not in DEFAULT_MODELS:
+        raise HTTPException(404, "unknown provider")
+    return provider
+
+
+def make_active(conn, user_id: int, provider: str) -> None:
+    conn.execute("UPDATE ai_providers SET active = 0 WHERE user_id = ?", (user_id,))
+    conn.execute(
+        "UPDATE ai_providers SET active = 1 WHERE user_id = ? AND provider = ?",
+        (user_id, provider),
+    )
+
+
+@app.get("/api/ai/settings")
+def ai_settings(request: Request):
+    """The client calls the AI provider directly, so it needs the key itself."""
+    user = require_user(request)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT provider, api_key, model, active FROM ai_providers"
+            " WHERE user_id = ? ORDER BY provider",
+            (user["id"],),
+        ).fetchall()
+    active = next((r["provider"] for r in rows if r["active"]), None)
+    return {
+        "active": active,
+        "providers": {
+            r["provider"]: {"api_key": r["api_key"], "model": r["model"]} for r in rows
+        },
+    }
+
+
+@app.put("/api/ai/providers/{provider}")
+def put_provider(provider: str, body: ProviderIn, request: Request):
+    user = require_user(request)
+    require_provider(provider)
+    with db() as conn:
+        existing = conn.execute(
+            "SELECT model FROM ai_providers WHERE user_id = ? AND provider = ?",
+            (user["id"], provider),
+        ).fetchone()
+        if body.api_key is not None:
+            key = body.api_key.strip()
+            if not key:
+                raise HTTPException(400, "api_key required")
+            model = (body.model or "").strip() or (
+                existing["model"] if existing else DEFAULT_MODELS[provider]
+            )
+            conn.execute(
+                "INSERT INTO ai_providers (user_id, provider, api_key, model)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(user_id, provider) DO UPDATE SET api_key = excluded.api_key,"
+                " model = excluded.model",
+                (user["id"], provider, key, model),
+            )
+            # A newly added (or replaced) key becomes the active provider.
+            make_active(conn, user["id"], provider)
+        elif body.model is not None:
+            if not existing:
+                raise HTTPException(404, "no key for that provider")
+            model = body.model.strip()
+            if not model:
+                raise HTTPException(400, "model required")
+            conn.execute(
+                "UPDATE ai_providers SET model = ? WHERE user_id = ? AND provider = ?",
+                (model, user["id"], provider),
+            )
+        else:
+            raise HTTPException(400, "api_key or model required")
+    return {"ok": True}
+
+
+@app.post("/api/ai/active")
+def set_active(body: ActiveIn, request: Request):
+    user = require_user(request)
+    require_provider(body.provider)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM ai_providers WHERE user_id = ? AND provider = ?",
+            (user["id"], body.provider),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "no key for that provider")
+        make_active(conn, user["id"], body.provider)
+    return {"ok": True}
+
+
+@app.delete("/api/ai/providers/{provider}")
+def delete_provider(provider: str, request: Request):
+    user = require_user(request)
+    require_provider(provider)
+    with db() as conn:
+        was_active = conn.execute(
+            "SELECT active FROM ai_providers WHERE user_id = ? AND provider = ?",
+            (user["id"], provider),
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM ai_providers WHERE user_id = ? AND provider = ?",
+            (user["id"], provider),
+        )
+        # Removing the active provider hands active to whatever key is left.
+        if was_active and was_active["active"]:
+            other = conn.execute(
+                "SELECT provider FROM ai_providers WHERE user_id = ? ORDER BY provider",
+                (user["id"],),
+            ).fetchone()
+            if other:
+                make_active(conn, user["id"], other["provider"])
+    return {"ok": True}
 
 
 if os.path.isdir("static"):
