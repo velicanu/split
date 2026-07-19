@@ -27,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def reset_if_stale(conn):
@@ -180,10 +180,25 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS ai_providers ("
             " user_id INTEGER NOT NULL REFERENCES users(id),"
             " provider TEXT NOT NULL,"
-            " api_key TEXT NOT NULL,"
             " model TEXT NOT NULL,"
             " active INTEGER NOT NULL DEFAULT 0,"
             " PRIMARY KEY (user_id, provider))"
+        )
+        # The API key itself, sealed to one recipient. Same shape and same
+        # reasoning as group_keys: the server relays copies it cannot open, and
+        # accepts only rows you address to yourself.
+        #
+        # This is a live billable credential — the most immediately expensive
+        # thing in the database — so it gets the same treatment as everything
+        # else rather than being the one plaintext exception.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ai_keys ("
+            " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " provider TEXT NOT NULL,"
+            " recipient_kind TEXT NOT NULL,"
+            " recipient_id TEXT NOT NULL,"
+            " ciphertext TEXT NOT NULL,"
+            " PRIMARY KEY (user_id, provider, recipient_kind, recipient_id))"
         )
 
 
@@ -265,7 +280,8 @@ class ReceiptIn(BaseModel):
 
 
 class ProviderIn(BaseModel):
-    api_key: str | None = None
+    # No api_key field: a plaintext key sent here would be silently ignored,
+    # which is worse than refusing it. Keys arrive sealed, via /keys.
     model: str | None = None
 
 
@@ -421,7 +437,7 @@ def list_devices(request: Request):
     user = require_user(request)
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, label, created_at, revoked_at FROM devices"
+            "SELECT id, label, box_pubkey, created_at, revoked_at FROM devices"
             " WHERE user_id = ? ORDER BY created_at",
             (user["id"],),
         ).fetchall()
@@ -863,60 +879,115 @@ def make_active(conn, user_id: int, provider: str) -> None:
 
 @app.get("/api/ai/settings")
 def ai_settings(request: Request):
-    """The client calls the AI provider directly, so it needs the key itself."""
+    """Model choice and which provider is in use, plus the API key sealed to
+    *this* device. The key is ciphertext; the client opens it locally and the
+    server has no copy it can read."""
     user = require_user(request)
     with db() as conn:
         rows = conn.execute(
-            "SELECT provider, api_key, model, active FROM ai_providers"
+            "SELECT provider, model, active FROM ai_providers"
             " WHERE user_id = ? ORDER BY provider",
             (user["id"],),
         ).fetchall()
+        sealed = conn.execute(
+            "SELECT provider, ciphertext FROM ai_keys"
+            " WHERE user_id = ? AND recipient_kind = 'device' AND recipient_id = ?",
+            (user["id"], user["device_id"]),
+        ).fetchall()
+    mine = {r["provider"]: r["ciphertext"] for r in sealed}
     active = next((r["provider"] for r in rows if r["active"]), None)
     return {
         "active": active,
         "providers": {
-            r["provider"]: {"api_key": r["api_key"], "model": r["model"]} for r in rows
+            r["provider"]: {
+                "model": r["model"],
+                # None means: a key exists for this account but not sealed to
+                # this device yet. The UI can say so rather than pretending
+                # there is no key at all.
+                "sealed_key": mine.get(r["provider"]),
+            }
+            for r in rows
         },
     }
+
+
+@app.post("/api/ai/providers/{provider}/keys")
+def put_ai_keys(provider: str, body: GroupKeysIn, request: Request):
+    """Store the API key sealed to my own devices and account.
+
+    Same rule as group keys: you may only address yourself. Accepting a row
+    aimed at someone else would let a user plant a credential on another
+    account, and the recipient could not tell it was not their own."""
+    user = require_user(request)
+    require_provider(provider)
+    with db() as conn:
+        my_devices = {
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM devices WHERE user_id = ?", (user["id"],)
+            ).fetchall()
+        }
+        for k in body.keys:
+            kind = k.get("recipient_kind")
+            rid = str(k.get("recipient_id", ""))
+            ciphertext = k.get("ciphertext")
+            if not ciphertext or kind not in ("account", "device"):
+                raise HTTPException(400, "malformed key")
+            mine = rid == str(user["id"]) if kind == "account" else rid in my_devices
+            if not mine:
+                raise HTTPException(403, "you can only store keys for yourself")
+            conn.execute(
+                "INSERT OR REPLACE INTO ai_keys"
+                " (user_id, provider, recipient_kind, recipient_id, ciphertext)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (user["id"], provider, kind, rid, ciphertext),
+            )
+        # Storing a key is what makes a provider usable, so it becomes active.
+        conn.execute(
+            "INSERT INTO ai_providers (user_id, provider, model) VALUES (?, ?, ?)"
+            " ON CONFLICT(user_id, provider) DO NOTHING",
+            (user["id"], provider, DEFAULT_MODELS[provider]),
+        )
+        make_active(conn, user["id"], provider)
+    return {"ok": True}
+
+
+@app.get("/api/ai/providers/{provider}/keys")
+def get_ai_keys(provider: str, request: Request):
+    """Every sealed copy of my key for this provider — used during enrolment,
+    where the account copy is the only one a brand-new device can open."""
+    user = require_user(request)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT recipient_kind, recipient_id, ciphertext FROM ai_keys"
+            " WHERE user_id = ? AND provider = ?",
+            (user["id"], provider),
+        ).fetchall()
+    return {"keys": [dict(r) for r in rows]}
 
 
 @app.put("/api/ai/providers/{provider}")
 def put_provider(provider: str, body: ProviderIn, request: Request):
     user = require_user(request)
     require_provider(provider)
+    # Only the model is settable here now; the key arrives sealed, via
+    # /keys, and never passes through the server in the clear.
+    if body.model is None:
+        raise HTTPException(400, "model required")
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(400, "model required")
     with db() as conn:
         existing = conn.execute(
             "SELECT model FROM ai_providers WHERE user_id = ? AND provider = ?",
             (user["id"], provider),
         ).fetchone()
-        if body.api_key is not None:
-            key = body.api_key.strip()
-            if not key:
-                raise HTTPException(400, "api_key required")
-            model = (body.model or "").strip() or (
-                existing["model"] if existing else DEFAULT_MODELS[provider]
-            )
-            conn.execute(
-                "INSERT INTO ai_providers (user_id, provider, api_key, model)"
-                " VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(user_id, provider) DO UPDATE SET api_key = excluded.api_key,"
-                " model = excluded.model",
-                (user["id"], provider, key, model),
-            )
-            # A newly added (or replaced) key becomes the active provider.
-            make_active(conn, user["id"], provider)
-        elif body.model is not None:
-            if not existing:
-                raise HTTPException(404, "no key for that provider")
-            model = body.model.strip()
-            if not model:
-                raise HTTPException(400, "model required")
-            conn.execute(
-                "UPDATE ai_providers SET model = ? WHERE user_id = ? AND provider = ?",
-                (model, user["id"], provider),
-            )
-        else:
-            raise HTTPException(400, "api_key or model required")
+        if not existing:
+            raise HTTPException(404, "no key for that provider")
+        conn.execute(
+            "UPDATE ai_providers SET model = ? WHERE user_id = ? AND provider = ?",
+            (model, user["id"], provider),
+        )
     return {"ok": True}
 
 
@@ -946,6 +1017,12 @@ def delete_provider(provider: str, request: Request):
         ).fetchone()
         conn.execute(
             "DELETE FROM ai_providers WHERE user_id = ? AND provider = ?",
+            (user["id"], provider),
+        )
+        # Every sealed copy goes too, or removing a key would leave it readable
+        # on the devices it was already sealed to.
+        conn.execute(
+            "DELETE FROM ai_keys WHERE user_id = ? AND provider = ?",
             (user["id"], provider),
         )
         # Removing the active provider hands active to whatever key is left.

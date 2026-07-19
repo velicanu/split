@@ -6,7 +6,7 @@ os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "test.db")
 
 from fastapi.testclient import TestClient
 
-from main import app
+from main import DB_PATH, app
 
 client = TestClient(app, base_url="https://testserver")
 
@@ -288,6 +288,167 @@ def test_receipt_upload_validation():
     assert u.get(f"/api/groups/{gid}/receipts/nope").status_code == 404
 
 
+def seal(text):
+    """Stand-in for a sealed blob. The server never opens these, so a real
+    seal would prove nothing here — what matters is that it stores and
+    relays exactly what it was given."""
+    return f"sealed:{text}"
+
+
+def put_key(client, provider, ciphertext, me=None):
+    me = me or client.get("/api/me").json()
+    return client.post(
+        f"/api/ai/providers/{provider}/keys",
+        json={
+            "keys": [
+                {
+                    "recipient_kind": "device",
+                    "recipient_id": me["device_id"],
+                    "ciphertext": ciphertext,
+                },
+                {
+                    "recipient_kind": "account",
+                    "recipient_id": str(me["id"]),
+                    "ciphertext": seal("account-copy"),
+                },
+            ]
+        },
+    )
+
+
+def test_the_server_never_holds_a_readable_api_key():
+    """The whole point of this change: a live billable credential must be as
+    opaque to the server as an expense is."""
+    import sqlite3
+
+    u = signed_up("ai-opaque")
+    assert put_key(u, "openai", seal("sk-secret-value")).status_code == 200
+
+    conn = sqlite3.connect(DB_PATH)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(ai_providers)")}
+    assert "api_key" not in columns, "no plaintext column may survive"
+
+    # The server stores precisely the bytes it was handed and never decodes
+    # them. That it is *unreadable* depends on the client sealing properly,
+    # which real crypto proves in aikeys.test.js — a stand-in seal here could
+    # only ever prove that a string round-trips.
+    stored = [
+        r[0]
+        for r in conn.execute(
+            "SELECT ciphertext FROM ai_keys WHERE recipient_kind = 'device'"
+        )
+    ]
+    assert stored == [seal("sk-secret-value")]
+
+
+def test_ai_settings_returns_only_this_devices_copy():
+    u = signed_up("ai-mine")
+    me = u.get("/api/me").json()
+    put_key(u, "openai", seal("for-my-device"), me)
+
+    s = u.get("/api/ai/settings").json()
+    assert s["active"] == "openai"
+    assert s["providers"]["openai"]["sealed_key"] == seal("for-my-device")
+    assert s["providers"]["openai"]["model"] == "gpt-5.4-nano"
+    # The plaintext key is not a field the API even has any more.
+    assert "api_key" not in s["providers"]["openai"]
+
+
+def test_a_device_with_no_sealed_copy_is_told_so_rather_than_shown_nothing():
+    owner, (_, _), (own_priv, own_pub) = __import__("test_auth").enrolled("ai-2dev")
+    from test_auth import b64, keypair, sign_in
+
+    me = owner.get("/api/me").json()
+    put_key(owner, "openai", seal("first-device-copy"), me)
+
+    # A second device enrolled after the key was saved.
+    second_priv, second_pub = keypair()
+    owner.post(
+        "/api/devices",
+        json={
+            "pubkey": second_pub,
+            "box_pubkey": "b2",
+            "label": "phone",
+            "signed_by": "device",
+            "signer_pubkey": own_pub,
+            "signature": b64(own_priv.sign(second_pub.encode())),
+        },
+    )
+    phone = TestClient(app, base_url="https://testserver")
+    sign_in(phone, second_priv, second_pub)
+
+    s = phone.get("/api/ai/settings").json()
+    # The provider is known, but this device holds no copy it can open.
+    assert s["providers"]["openai"]["sealed_key"] is None
+    assert s["providers"]["openai"]["model"] == "gpt-5.4-nano"
+
+    # Every copy is still fetchable for the enrolment path, including the
+    # account one the new device can actually open.
+    keys = phone.get("/api/ai/providers/openai/keys").json()["keys"]
+    assert {k["recipient_kind"] for k in keys} == {"device", "account"}
+
+
+def test_you_can_only_seal_an_api_key_to_yourself():
+    victim = signed_up("ai-victim")
+    victim_me = victim.get("/api/me").json()
+    attacker = signed_up("ai-attacker")
+
+    for kind, rid in (
+        ("device", victim_me["device_id"]),
+        ("account", str(victim_me["id"])),
+    ):
+        r = attacker.post(
+            "/api/ai/providers/openai/keys",
+            json={
+                "keys": [
+                    {
+                        "recipient_kind": kind,
+                        "recipient_id": rid,
+                        "ciphertext": seal("planted"),
+                    }
+                ]
+            },
+        )
+        assert r.status_code == 403, kind
+    assert victim.get("/api/ai/settings").json() == {"active": None, "providers": {}}
+
+
+def test_ai_key_endpoints_need_auth_and_a_real_provider():
+    u = signed_up("ai-guard")
+    assert put_key(u, "bogus", seal("x")).status_code == 404
+    assert (
+        u.post(
+            "/api/ai/providers/openai/keys",
+            json={
+                "keys": [
+                    {
+                        "recipient_kind": "nonsense",
+                        "recipient_id": "1",
+                        "ciphertext": "x",
+                    }
+                ]
+            },
+        ).status_code
+        == 400
+    )
+    anon = TestClient(app, base_url="https://testserver")
+    assert anon.get("/api/ai/providers/openai/keys").status_code == 401
+    assert (
+        anon.post("/api/ai/providers/openai/keys", json={"keys": []}).status_code == 401
+    )
+
+
+def test_removing_a_provider_removes_every_sealed_copy():
+    u = signed_up("ai-remove")
+    put_key(u, "openai", seal("gone-soon"))
+    assert u.get("/api/ai/providers/openai/keys").json()["keys"]
+
+    assert u.delete("/api/ai/providers/openai").status_code == 200
+    # Otherwise the key stays readable on the devices it was sealed to.
+    assert u.get("/api/ai/providers/openai/keys").json()["keys"] == []
+    assert u.get("/api/ai/settings").json() == {"active": None, "providers": {}}
+
+
 def test_ai_provider_settings():
     u = signed_up("aiuser")
 
@@ -296,19 +457,16 @@ def test_ai_provider_settings():
     assert s == {"active": None, "providers": {}}
 
     # Adding a key makes that provider active, defaulting to the cheapest model
-    assert (
-        u.put("/api/ai/providers/anthropic", json={"api_key": "sk-ant-1"}).status_code
-        == 200
-    )
+    assert put_key(u, "anthropic", seal("sk-ant-1")).status_code == 200
     s = u.get("/api/ai/settings").json()
     assert s["active"] == "anthropic"
     assert s["providers"]["anthropic"] == {
-        "api_key": "sk-ant-1",
+        "sealed_key": seal("sk-ant-1"),
         "model": "claude-haiku-4-5",
     }
 
     # Adding a second key makes the newly added provider active
-    u.put("/api/ai/providers/openai", json={"api_key": "sk-oai-1"})
+    put_key(u, "openai", seal("sk-oai-1"))
     s = u.get("/api/ai/settings").json()
     assert s["active"] == "openai"
     assert s["providers"]["openai"]["model"] == "gpt-5.4-nano"
@@ -325,9 +483,12 @@ def test_ai_provider_settings():
     assert s["active"] == "anthropic"
 
     # Replacing a key keeps the chosen model but re-activates that provider
-    u.put("/api/ai/providers/openai", json={"api_key": "sk-oai-2"})
+    put_key(u, "openai", seal("sk-oai-2"))
     s = u.get("/api/ai/settings").json()
-    assert s["providers"]["openai"] == {"api_key": "sk-oai-2", "model": "gpt-5.4-mini"}
+    assert s["providers"]["openai"] == {
+        "sealed_key": seal("sk-oai-2"),
+        "model": "gpt-5.4-mini",
+    }
     assert s["active"] == "openai"
 
     # Deleting the active provider hands active to the remaining key
@@ -343,7 +504,7 @@ def test_ai_provider_settings():
 
 def test_ai_provider_validation():
     u = signed_up("aiuser2")
-    assert u.put("/api/ai/providers/bogus", json={"api_key": "x"}).status_code == 404
+    assert u.put("/api/ai/providers/bogus", json={"model": "x"}).status_code == 404
     assert u.post("/api/ai/active", json={"provider": "bogus"}).status_code == 404
     # selecting or setting a model for a provider with no key
     assert u.post("/api/ai/active", json={"provider": "openai"}).status_code == 404
@@ -352,9 +513,14 @@ def test_ai_provider_validation():
         == 404
     )
     assert u.put("/api/ai/providers/openai", json={}).status_code == 400
-    assert u.put("/api/ai/providers/openai", json={"api_key": "  "}).status_code == 400
+    assert u.put("/api/ai/providers/openai", json={"model": "  "}).status_code == 400
+    # A plaintext key is not silently accepted — the field no longer exists,
+    # so this is just a model-less request.
+    assert (
+        u.put("/api/ai/providers/openai", json={"api_key": "sk-x"}).status_code == 400
+    )
 
     # keys are scoped per user
     other = signed_up("aiuser3")
-    u.put("/api/ai/providers/anthropic", json={"api_key": "mine"})
+    put_key(u, "anthropic", seal("mine"))
     assert other.get("/api/ai/settings").json()["providers"] == {}

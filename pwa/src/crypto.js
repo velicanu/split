@@ -180,6 +180,29 @@ export async function openSealed(boxPubkeyB64, boxPrivkeyB64, sealedB64) {
   }
 }
 
+/** Seal an arbitrary string. Distinct from sealTo, which takes base64 because
+ *  the things it seals are keys; handing it a plain secret would fail at the
+ *  base64 decode rather than anywhere informative. */
+export async function sealText(boxPubkeyB64, text) {
+  await ready
+  return b64(sodium.crypto_box_seal(sodium.from_string(text), unb64(boxPubkeyB64)))
+}
+
+export async function openSealedText(boxPubkeyB64, boxPrivkeyB64, sealedB64) {
+  await ready
+  try {
+    return sodium.to_string(
+      sodium.crypto_box_seal_open(
+        unb64(sealedB64),
+        unb64(boxPubkeyB64),
+        unb64(boxPrivkeyB64)
+      )
+    )
+  } catch {
+    throw new Error('Could not open that secret')
+  }
+}
+
 // --- payloads ----------------------------------------------------------
 
 /** Encrypt an event payload under the group key. The nonce is random per
