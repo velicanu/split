@@ -50,23 +50,52 @@ const reply = ({ subtotal, total }) => ({
   }),
 })
 
+// Routes the two calls the form makes: uploading a receipt to our own server
+// and asking the model to read one. Records what was uploaded so tests can
+// assert an image was kept even when no scan ran.
+let uploaded
+function serve({ subtotal = 3000, total = 3850, uploadFails = false } = {}) {
+  uploaded = []
+  globalThis.fetch = async (url, options) => {
+    const path = String(url)
+    if (path.endsWith('/receipts')) {
+      if (uploadFails) {
+        return { ok: false, status: 500, json: async () => ({ detail: 'disk full' }) }
+      }
+      uploaded.push(JSON.parse(options.body).data_url)
+      return { ok: true, json: async () => ({ receipt_id: `r${uploaded.length}` }) }
+    }
+    // Fetching a stored receipt back, for a re-scan.
+    if (path.startsWith('/api/receipts/')) {
+      return { ok: true, blob: async () => ({ name: 'stored.jpg' }) }
+    }
+    return reply({ subtotal, total })
+  }
+}
+
 let saved
-async function render() {
+async function render(ai = AI) {
   saved = []
   await mount(
     <ExpenseForm
+      groupId={7}
       members={MEMBERS}
       me="v"
-      ai={AI}
+      ai={ai}
       onSubmit={(e) => saved.push(e)}
       onCancel={() => {}}
     />
   )
 }
 
-// The scan control is a file input; the stand-in File is never read, since
-// createImageBitmap is stubbed and the model reply is mocked.
-const pickReceipt = () => upload($('.scan input'), { name: 'receipt.jpg' })
+// Two file inputs now: one keeps the receipt, one keeps it *and* scans. The
+// stand-in File is never read — createImageBitmap is stubbed.
+const control = (label) => byText('label', label)?.querySelector('input')
+const attachControl = () => control('add a receipt')
+const scanControl = () => control('add and scan')
+const pickReceipt = () => upload(scanControl(), { name: 'receipt.jpg' })
+const pickAttachment = () => upload(attachControl(), { name: 'receipt.jpg' })
+const thumbs = () => $$('.receipt-thumb')
 
 const amountField = () => $$('input')[1]
 const itemNames = () => values('.item-head input:first-child')
@@ -75,7 +104,7 @@ const field = (label) => byText('label', label)?.querySelector('input')
 
 describe('scanning a receipt that reconciles', () => {
   beforeEach(async () => {
-    globalThis.fetch = async () => reply({ subtotal: 3000, total: 3850 })
+    serve()
     await render()
     await pickReceipt()
   })
@@ -101,7 +130,7 @@ describe('scanning a receipt that reconciles', () => {
 describe('scanning a receipt whose items miss the subtotal', () => {
   beforeEach(async () => {
     // Items sum to $30 but the receipt says $35 — a line was misread.
-    globalThis.fetch = async () => reply({ subtotal: 3500, total: 4350 })
+    serve({ subtotal: 3500, total: 4350 })
     await render()
     await pickReceipt()
   })
@@ -187,7 +216,7 @@ describe('scanning a receipt whose items miss the subtotal', () => {
 
 describe('saving a scanned receipt', () => {
   beforeEach(async () => {
-    globalThis.fetch = async () => reply({ subtotal: 3000, total: 3850 })
+    serve()
     await render()
     await pickReceipt()
     await change($('input'), 'Dinner')
@@ -207,40 +236,180 @@ describe('saving a scanned receipt', () => {
   })
 })
 
-describe('the scan control', () => {
-  test('is offered in every split mode once a key exists', async () => {
+describe('the receipt controls', () => {
+  const NO_AI = { active: null, providers: {} }
+
+  test('both are offered in every split mode when a key exists', async () => {
+    serve()
     await render()
     for (const mode of ['equal', 'percentage', 'shares', 'items']) {
       await change($('select'), mode)
-      assert.ok($('.scan'), `no scan control in ${mode} mode`)
+      assert.ok(attachControl(), `no attach control in ${mode} mode`)
+      assert.ok(scanControl(), `no scan control in ${mode} mode`)
     }
   })
 
-  test('is hidden when no provider is configured', async () => {
-    await mount(
-      <ExpenseForm
-        members={MEMBERS}
-        me="v"
-        ai={{ active: null, providers: {} }}
-        onSubmit={() => {}}
-        onCancel={() => {}}
-      />
-    )
-    assert.equal($('.scan'), null)
+  test('attaching is offered without a key; scanning is not', async () => {
+    serve()
+    await render(NO_AI)
+    assert.ok(attachControl(), 'keeping a receipt must not need an API key')
+    assert.equal(scanControl(), undefined)
   })
 })
 
-describe('a failed scan', () => {
-  test('reports the error and changes nothing', async () => {
-    globalThis.fetch = async () => ({
-      ok: false,
-      status: 401,
-      json: async () => ({ error: { message: 'bad key' } }),
-    })
+describe('attaching a receipt without scanning', () => {
+  beforeEach(async () => {
+    serve()
+    await render()
+    await pickAttachment()
+  })
+
+  test('uploads the image and shows it', () => {
+    assert.equal(uploaded.length, 1)
+    assert.ok(uploaded[0].startsWith('data:image/jpeg;base64,'))
+    assert.equal(thumbs().length, 1)
+  })
+
+  test('leaves the form alone — no scan ran', () => {
+    assert.equal($('select').value, 'equal')
+    assert.equal(amountField().value, '')
+    assert.equal($$('.item-head').length, 0)
+    assert.ok(!text().includes('check this scan'))
+  })
+
+  test('saves the receipt id on the expense', async () => {
+    await change($('input'), 'Lunch')
+    await change(amountField(), '20.00')
+    await submit($('form'))
+    assert.deepEqual(saved[0].receipts, ['r1'])
+  })
+})
+
+describe('attaching a receipt without an API key', () => {
+  test('works end to end', async () => {
+    serve()
+    await render({ active: null, providers: {} })
+    await pickAttachment()
+    assert.equal(thumbs().length, 1)
+    await change($('input'), 'Lunch')
+    await change(amountField(), '20.00')
+    await submit($('form'))
+    assert.deepEqual(saved[0].receipts, ['r1'])
+  })
+})
+
+describe('scanning keeps the receipt too', () => {
+  test('a one-shot scan uploads the image as well as reading it', async () => {
+    serve()
+    await render()
+    await pickReceipt()
+    assert.equal(uploaded.length, 1, 'the photo should be kept, not just read')
+    assert.equal(thumbs().length, 1)
+    assert.equal($('select').value, 'items')
+
+    await change($('input'), 'Dinner')
+    await submit($('form'))
+    assert.deepEqual(saved[0].receipts, ['r1'])
+  })
+
+  test('several receipts can be attached to one expense', async () => {
+    serve()
+    await render()
+    await pickAttachment()
+    await pickAttachment()
+    assert.equal(thumbs().length, 2)
+    await change($('input'), 'Dinner')
+    await change(amountField(), '20.00')
+    await submit($('form'))
+    assert.deepEqual(saved[0].receipts, ['r1', 'r2'])
+  })
+
+  test('a receipt can be removed again', async () => {
+    serve()
+    await render()
+    await pickAttachment()
+    await click(byText('button', 'remove'))
+    assert.equal(thumbs().length, 0)
+    await change($('input'), 'Dinner')
+    await change(amountField(), '20.00')
+    await submit($('form'))
+    assert.deepEqual(saved[0].receipts, [])
+  })
+})
+
+describe('re-scanning a stored receipt', () => {
+  test('reads the stored image without uploading it again', async () => {
+    serve()
+    await render()
+    await pickAttachment()
+    assert.equal($('select').value, 'equal', 'attaching alone must not scan')
+
+    await click(byText('button', 'scan'))
+    assert.equal($('select').value, 'items')
+    assert.deepEqual(itemNames(), ['Burger', 'Wine'])
+    assert.equal(uploaded.length, 1, 'a re-scan must not duplicate the image')
+    assert.equal(thumbs().length, 1)
+  })
+})
+
+describe('an expense that already has receipts', () => {
+  test('keeps them when edited', async () => {
+    serve()
+    await mount(
+      <ExpenseForm
+        groupId={7}
+        members={MEMBERS}
+        me="v"
+        ai={AI}
+        initial={{
+          expense_id: 'e1',
+          description: 'Dinner',
+          amount_cents: 2000,
+          payers: [{ user_id: 1, paid_cents: 2000 }],
+          splits: [
+            { user_id: 1, share_cents: 1000 },
+            { user_id: 2, share_cents: 1000 },
+          ],
+          receipts: ['old-1'],
+          date: '2026-01-01',
+        }}
+        onSubmit={(e) => saved.push(e)}
+        onCancel={() => {}}
+      />
+    )
+    assert.equal(thumbs().length, 1)
+    await submit($('form'))
+    assert.deepEqual(saved[0].receipts, ['old-1'])
+  })
+})
+
+describe('failures', () => {
+  test('a failed scan reports the error and changes nothing', async () => {
+    serve()
+    const ok = globalThis.fetch
+    globalThis.fetch = async (url, options) =>
+      String(url).endsWith('/receipts')
+        ? ok(url, options)
+        : {
+            ok: false,
+            status: 401,
+            json: async () => ({ error: { message: 'bad key' } }),
+          }
     await render()
     await pickReceipt()
     assert.ok(text().includes('rejected the API key'))
     assert.equal($('select').value, 'equal')
     assert.equal(amountField().value, '')
+    // The upload happened first, so the photo is kept even though the read failed.
+    assert.equal(thumbs().length, 1)
+  })
+
+  test('a failed upload reports the error and skips the scan', async () => {
+    serve({ uploadFails: true })
+    await render()
+    await pickReceipt()
+    assert.equal(thumbs().length, 0)
+    assert.equal($('select').value, 'equal', 'no scan should have run')
+    assert.ok(text().includes('disk full'))
   })
 })

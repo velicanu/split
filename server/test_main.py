@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 
@@ -226,6 +227,79 @@ def test_change_password_requires_auth():
         ).status_code
         == 401
     )
+
+
+PNG = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def test_receipt_upload_and_fetch():
+    owner = signed_up("rcpt-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+
+    r = owner.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG})
+    assert r.status_code == 200
+    rid = r.json()["receipt_id"]
+
+    got = owner.get(f"/api/receipts/{rid}")
+    assert got.status_code == 200
+    assert got.headers["content-type"] == "image/png"
+    assert got.headers["x-content-type-options"] == "nosniff"
+    assert got.content == base64.b64decode(PNG.split(",", 1)[1])
+
+    # every member of the group can see it
+    other = signed_up("rcpt-member")
+    other.post("/api/groups/join", json={"code": group["code"]})
+    assert other.get(f"/api/receipts/{rid}").status_code == 200
+
+
+def test_receipts_are_private_to_the_group():
+    owner = signed_up("rcpt-private")
+    gid = owner.post("/api/groups", json={"name": "Flat"}).json()["id"]
+    rid = owner.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG}).json()[
+        "receipt_id"
+    ]
+
+    stranger = signed_up("rcpt-stranger")
+    assert stranger.get(f"/api/receipts/{rid}").status_code == 404
+    # and a non-member cannot upload into someone else's group
+    assert (
+        stranger.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG}).status_code
+        == 404
+    )
+
+    anon = TestClient(app, base_url="https://testserver")
+    assert anon.get(f"/api/receipts/{rid}").status_code == 401
+    assert (
+        anon.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG}).status_code
+        == 401
+    )
+
+
+def test_receipt_upload_validation():
+    u = signed_up("rcpt-validate")
+    gid = u.post("/api/groups", json={"name": "V"}).json()["id"]
+
+    def post(data_url):
+        return u.post(
+            f"/api/groups/{gid}/receipts", json={"data_url": data_url}
+        ).status_code
+
+    assert post("not-a-data-url") == 400
+    assert post("data:image/png,notbase64") == 400
+    # An SVG served from our own origin would be stored XSS, so raster only.
+    assert post("data:image/svg+xml;base64,PHN2Zy8+") == 400
+    assert post("data:text/html;base64,PGgxPmhpPC9oMT4=") == 400
+    assert post("data:image/png;base64,not valid base64!!") == 400
+    assert post("data:image/png;base64,") == 400
+
+    oversized = base64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode()
+    assert post(f"data:image/png;base64,{oversized}") == 413
+
+    assert u.get("/api/receipts/nope").status_code == 404
 
 
 def test_ai_provider_settings():
