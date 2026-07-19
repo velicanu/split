@@ -40,6 +40,28 @@ export function splitByWeights(amountCents, weights) {
   return shares
 }
 
+// Receipt claiming -> weights. An item claimed by several people splits equally
+// between them; an unclaimed item splits equally among everyone on the receipt.
+// The weights sum to the items subtotal; feeding them to splitByWeights with the
+// receipt total is what spreads tax/tip (or a discount) proportionally — items
+// decide the shares, the total decides what everyone actually owes.
+export function receiptWeights(items, participantIds) {
+  const weights = {}
+  for (const id of participantIds) weights[id] = 0
+  for (const item of items) {
+    const price = item.price_cents || 0
+    if (price <= 0) continue
+    const claimed = (item.claimed_by || []).filter((id) =>
+      participantIds.includes(id)
+    )
+    const targets = claimed.length ? claimed : participantIds
+    if (!targets.length) continue
+    const each = price / targets.length
+    for (const id of targets) weights[id] += each
+  }
+  return weights
+}
+
 // Fold events (in ascending id / total order) into the displayable state.
 export function computeState(events) {
   const members = []

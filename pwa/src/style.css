@@ -197,6 +197,40 @@ input.pay-amt {
   cursor: pointer;
 }
 
+.participants.receipt {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.6rem;
+}
+
+.item {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 0.5rem;
+}
+
+.item:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.item-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.item-head input:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.claims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.3rem;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
