@@ -1,7 +1,7 @@
 FROM node:26-alpine AS pwa
 WORKDIR /pwa
-COPY pwa/package.json ./
-RUN npm install
+COPY pwa/package.json pwa/package-lock.json ./
+RUN npm ci
 COPY pwa/ ./
 RUN npm run build
 
