@@ -14,18 +14,9 @@ import {
   splitEqually,
 } from './ledger'
 import { PROVIDERS, extractReceipt, prepareImage } from './ai'
+import { api } from './api'
 import { changePassword, enrol, logout as signOut, resume, signup } from './auth'
 
-async function api(path, body, method) {
-  const res = await fetch(`/api/${path}`, {
-    method: method || (body ? 'POST' : 'GET'),
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.detail || res.statusText)
-  return data
-}
 
 const money = (cents) =>
   `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`

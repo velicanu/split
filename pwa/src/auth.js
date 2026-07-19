@@ -8,6 +8,7 @@
 //
 // The server never sees a password or any private key. See plan/11.
 
+import { api } from './api'
 import {
   forgetDeviceKey,
   generateAccountKey,
@@ -19,16 +20,6 @@ import {
   wrapAccountKey,
 } from './crypto'
 
-async function api(path, body, method) {
-  const res = await fetch(`/api/${path}`, {
-    method: method || (body ? 'POST' : 'GET'),
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.detail || res.statusText)
-  return data
-}
 
 const deviceLabel = () => {
   const ua = navigator.userAgent || ''

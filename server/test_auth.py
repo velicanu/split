@@ -375,3 +375,112 @@ def test_replacing_wraps_requires_a_session():
     )
     assert c.put("/api/wraps", json={"wraps": []}).status_code == 400
     assert client().put("/api/wraps", json=body).status_code == 401
+
+
+def test_a_stale_database_is_wiped_rather_than_half_migrated():
+    """`CREATE TABLE IF NOT EXISTS` does nothing to an older table, so without
+    an explicit reset a deployed database keeps its old columns and the first
+    INSERT fails at runtime. That is what shipped with PR A."""
+    import sqlite3
+    import tempfile as tf
+
+    from main import SCHEMA_VERSION, init_db, reset_if_stale
+
+    path = os.path.join(tf.mkdtemp(), "old.db")
+    conn = sqlite3.connect(path)
+    # The pre-PR-A users table, as deployed.
+    conn.execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE"
+        " NOT NULL, salt BLOB NOT NULL, pw_hash BLOB NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO users (username, salt, pw_hash) VALUES ('v', x'00', x'00')"
+    )
+    conn.commit()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+    reset_if_stale(conn)
+    conn.commit()
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    remaining = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    assert remaining == [], "the stale schema must be gone, not patched"
+
+    # And a second run is a no-op: matching version, nothing dropped.
+    conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO users (id) VALUES (1)")
+    conn.commit()
+    reset_if_stale(conn)
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+
+    assert init_db and SCHEMA_VERSION >= 2
+
+
+def test_index_html_is_never_cached_but_hashed_assets_are():
+    """A cached index.html names old hashed bundles, so an old client ends up
+    talking to a new API — which is how PR A produced a wall of 422s."""
+    import pathlib
+    import tempfile as tf
+
+    from main import AppStatics
+
+    root = pathlib.Path(tf.mkdtemp())
+    (root / "assets").mkdir()
+    (root / "index.html").write_text("<html></html>")
+    (root / "assets" / "index-abc123.js").write_text("// bundle")
+
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient as STestClient
+
+    site = Starlette()
+    site.mount("/", AppStatics(directory=str(root), html=True))
+    c = STestClient(site)
+
+    assert c.get("/index.html").headers["cache-control"] == "no-cache"
+    assert c.get("/").headers["cache-control"] == "no-cache"
+    assert (
+        c.get("/assets/index-abc123.js").headers["cache-control"]
+        == "public, max-age=31536000, immutable"
+    )
+
+
+def test_init_db_actually_rebuilds_a_stale_database():
+    """The reset only matters if init_db calls it. PR A shipped a schema the
+    deployed database could not satisfy precisely because nothing wired the two
+    together, so this drives the whole path rather than the helper alone."""
+    import sqlite3
+    import tempfile as tf
+
+    import main
+
+    path = os.path.join(tf.mkdtemp(), "deployed.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE"
+        " NOT NULL, salt BLOB NOT NULL, pw_hash BLOB NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO users (username, salt, pw_hash) VALUES ('v', x'00', x'00')"
+    )
+    conn.commit()
+    conn.close()
+
+    original = main.DB_PATH
+    try:
+        main.DB_PATH = path
+        main.init_db()
+    finally:
+        main.DB_PATH = original
+
+    conn = sqlite3.connect(path)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+    assert "login_handle" in columns, "init_db must rebuild, not leave the old table"
+    assert "pw_hash" not in columns
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+    # And the tables PR A added are actually there to insert into.
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert {"devices", "key_wraps", "challenges"} <= tables

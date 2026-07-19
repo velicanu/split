@@ -129,11 +129,14 @@ describe('signing up', () => {
 
   test('the stored wrap really is the account key under that password', async () => {
     const server = fakeServer()
-    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    // Distinctive on purpose: the ciphertext is base64, so a short password
+    // like "pw" turns up in it by chance often enough to flake the assertion.
+    const password = 'correct-horse-battery-staple'
+    await signup({ login_handle: 'v', display_name: 'V', password })
 
     const wrap = server.wraps.v[0]
-    assert.ok(!wrap.ciphertext.includes('pw'))
-    const account = await unwrapAccountKey(wrap, 'pw')
+    assert.ok(!wrap.ciphertext.includes(password))
+    const account = await unwrapAccountKey(wrap, password)
     assert.equal(account.pubkey, server.users.v.account_pubkey)
     await assert.rejects(() => unwrapAccountKey(wrap, 'wrong'), /Wrong password/)
   })
