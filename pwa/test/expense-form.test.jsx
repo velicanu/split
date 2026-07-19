@@ -70,6 +70,7 @@ const pickReceipt = () => upload($('.scan input'), { name: 'receipt.jpg' })
 
 const amountField = () => $$('input')[1]
 const itemNames = () => values('.item-head input:first-child')
+const itemPrices = () => $$('.item-head .pay-amt')
 const field = (label) => byText('label', label)?.querySelector('input')
 
 describe('scanning a receipt that reconciles', () => {
@@ -114,13 +115,61 @@ describe('scanning a receipt whose items miss the subtotal', () => {
 
   test('shows both figures, the gap, and the items to check', () => {
     assert.ok(text().includes('add up to $30.00'))
-    assert.ok(text().includes("subtotal reads $35.00"))
+    assert.ok(text().includes('subtotal reads $35.00'))
     assert.ok(text().includes('$5.00 short'))
-    assert.ok(text().includes('Burger'))
+    assert.deepEqual(itemNames(), ['Burger', 'Wine'])
   })
 
-  test('"use it anyway" applies the scan', async () => {
-    await click(byText('button', 'use it anyway'))
+  test('correcting a misread price clears the warning as you type', async () => {
+    // The Wine line was read as $20; the receipt actually says $25.
+    await change(itemPrices()[1], '25.00')
+    assert.ok(!text().includes('short'), 'warning should be gone')
+    assert.ok(text().includes('matching the subtotal'))
+    assert.ok(byText('button', 'use these items'))
+  })
+
+  test('correcting the subtotal instead also reconciles', async () => {
+    // Maybe it was the subtotal that was misread, not a line.
+    await change(field('subtotal printed on the receipt'), '30.00')
+    assert.ok(text().includes('matching the subtotal'))
+  })
+
+  test('a missing line can be added', async () => {
+    await click(byText('button', '+ add item'))
+    const names = () => $$('.item-head input:first-child')
+    await change(names()[2], 'Dessert')
+    await change(itemPrices()[2], '5.00')
+    assert.ok(text().includes('matching the subtotal'))
+  })
+
+  test('a line the model invented can be removed', async () => {
+    // Drop Wine, then the remaining $10 needs a $10 subtotal to reconcile.
+    await click($$('.item-head .link.danger')[1])
+    assert.deepEqual(itemNames(), ['Burger'])
+    assert.ok(text().includes('add up to $10.00'))
+    await change(field('subtotal printed on the receipt'), '10.00')
+    assert.ok(text().includes('matching the subtotal'))
+  })
+
+  test('edits stay in the panel until the scan is used', async () => {
+    await change(itemPrices()[1], '25.00')
+    assert.equal($('select').value, 'equal', 'form untouched while pending')
+    assert.equal(amountField().value, '')
+    assert.equal(saved.length, 0)
+  })
+
+  test('the corrected items are what land in the form', async () => {
+    await change(itemPrices()[1], '25.00')
+    await click(byText('button', 'use these items'))
+    assert.ok(!text().includes('check this scan'))
+    assert.equal($('select').value, 'items')
+    assert.deepEqual(itemPrices().map((i) => i.value), ['10.00', '25.00'])
+    // The total is what was charged, not the corrected subtotal.
+    assert.equal(amountField().value, '43.50')
+  })
+
+  test('"use them anyway" applies the scan unreconciled', async () => {
+    await click(byText('button', 'use them anyway'))
     assert.ok(!text().includes('check this scan'))
     assert.equal($('select').value, 'items')
     assert.equal(amountField().value, '43.50')

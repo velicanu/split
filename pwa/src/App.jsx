@@ -29,6 +29,10 @@ async function api(path, body, method) {
 const money = (cents) =>
   `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`
 
+// Text field <-> cents. A blank or unparseable field counts as nothing.
+const toCents = (text) => Math.round(parseFloat(text) * 100) || 0
+const dollars = (cents) => (cents ? (cents / 100).toFixed(2) : '')
+
 // A crash must never leave a blank screen — show a reload prompt instead.
 // (Most likely cause: the app updated and a stale tab is running old code
 // against a newer API.)
@@ -906,7 +910,12 @@ function memberIdFor(members, me) {
 
 // Line items with per-person claims. Claim an item and it splits between its
 // claimants; leave it unclaimed and it splits among everyone on the receipt.
-function ReceiptEditor({ items, setItems, participants }) {
+function ReceiptEditor({
+  items,
+  setItems,
+  participants,
+  legend = 'items (unclaimed ones split among everyone)',
+}) {
   // Functional updates throughout: two edits batched in one tick (e.g. name and
   // price together) must not read the same stale list and clobber each other.
   const update = (idx, patch) =>
@@ -929,7 +938,7 @@ function ReceiptEditor({ items, setItems, participants }) {
 
   return (
     <fieldset className="participants receipt">
-      <legend>items (unclaimed ones split among everyone)</legend>
+      <legend>{legend}</legend>
       {items.length === 0 && (
         <p className="muted">No items yet — add the lines off the receipt.</p>
       )}
@@ -956,18 +965,20 @@ function ReceiptEditor({ items, setItems, participants }) {
               remove
             </button>
           </div>
-          <div className="claims">
-            {participants.map((m) => (
-              <label key={m.id} className="check">
-                <input
-                  type="checkbox"
-                  checked={it.claimed_by.includes(m.id)}
-                  onChange={() => toggleClaim(idx, m.id)}
-                />
-                {m.username}
-              </label>
-            ))}
-          </div>
+          {participants.length > 0 && (
+            <div className="claims">
+              {participants.map((m) => (
+                <label key={m.id} className="check">
+                  <input
+                    type="checkbox"
+                    checked={it.claimed_by.includes(m.id)}
+                    onChange={() => toggleClaim(idx, m.id)}
+                  />
+                  {m.username}
+                </label>
+              ))}
+            </div>
+          )}
         </div>
       ))}
       <button
@@ -1186,11 +1197,11 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
   })
   // Tax and tip are recorded for information only — the split is driven by the
   // item weights scaled to the total, so these never enter the maths.
-  const dollarsOr = (cents) => (cents ? (cents / 100).toFixed(2) : '')
-  const [tax, setTax] = useState(dollarsOr(initial?.split?.tax_cents))
-  const [tip, setTip] = useState(dollarsOr(initial?.split?.tip_cents))
-  // A scan whose items don't add up to the receipt's own subtotal, parked for
-  // the user to accept or throw away rather than silently filling the form.
+  const [tax, setTax] = useState(dollars(initial?.split?.tax_cents))
+  const [tip, setTip] = useState(dollars(initial?.split?.tip_cents))
+  // A scan whose items don't add up to the receipt's own subtotal, parked as an
+  // editable draft: the misread is usually one line or the subtotal itself, so
+  // it's fixable here rather than only acceptable or discardable wholesale.
   const [pending, setPending] = useState(null)
   const [payerIds, setPayerIds] = useState(() =>
     initial ? initial.payers.map((p) => p.user_id) : [memberIdFor(members, me)]
@@ -1207,18 +1218,26 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
   const toggle = (list, setList, id) =>
     setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
 
-  function applyScan(result) {
-    setItems(
-      result.items.map((it) => ({
-        id: crypto.randomUUID(),
-        name: it.name,
-        price: (it.price_cents / 100).toFixed(2),
-        claimed_by: [],
-      }))
-    )
-    setAmount((result.total_cents / 100).toFixed(2))
-    setTax(dollarsOr(result.tax_cents))
-    setTip(dollarsOr(result.tip_cents))
+  // Scan results and the form's own rows share a shape, so a draft can be
+  // edited with the same editor and then handed straight to the form.
+  const draftFrom = (result) => ({
+    items: result.items.map((it) => ({
+      id: crypto.randomUUID(),
+      name: it.name,
+      price: (it.price_cents / 100).toFixed(2),
+      claimed_by: [],
+    })),
+    subtotal: dollars(result.subtotal_cents),
+    tax: dollars(result.tax_cents),
+    tip: dollars(result.tip_cents),
+    total: (result.total_cents / 100).toFixed(2),
+  })
+
+  function applyDraft(draft) {
+    setItems(draft.items)
+    setAmount(draft.total)
+    setTax(draft.tax)
+    setTip(draft.tip)
     // A scan implies an itemised split, whatever mode you were in.
     setMode('items')
     setPending(null)
@@ -1244,8 +1263,9 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
       })
       // Items that don't reconcile with the printed subtotal mean something
       // was misread, so let the user look before it touches the form.
-      if (result.matches) applyScan(result)
-      else setPending(result)
+      const draft = draftFrom(result)
+      if (result.matches) applyDraft(draft)
+      else setPending(draft)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -1306,8 +1326,8 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         mode: 'items',
         participants,
         items: parsed,
-        tax_cents: Math.round(parseFloat(tax) * 100) || 0,
-        tip_cents: Math.round(parseFloat(tip) * 100) || 0,
+        tax_cents: toCents(tax),
+        tip_cents: toCents(tip),
       }
     } else {
       const w = {}
@@ -1380,13 +1400,24 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
 
   // Live receipt maths: the gap between the items and the total is the tax/tip
   // (or discount) that gets spread proportionally.
-  const amountCents = Math.round(parseFloat(amount) * 100) || 0
+  const amountCents = toCents(amount)
   const itemsTotalCents = items.reduce(
-    (t, it) => t + (Math.round(parseFloat(it.price) * 100) || 0),
+    (t, it) => t + toCents(it.price),
     0
   )
-  const taxCents = Math.round(parseFloat(tax) * 100) || 0
-  const tipCents = Math.round(parseFloat(tip) * 100) || 0
+  const taxCents = toCents(tax)
+  const tipCents = toCents(tip)
+  // The pending scan reconciles live, so fixing a misread line clears the
+  // warning as you type rather than only on a re-scan.
+  const pendingItemsCents = (pending?.items ?? []).reduce(
+    (t, it) => t + toCents(it.price),
+    0
+  )
+  const pendingSubtotalCents = toCents(pending?.subtotal)
+  // No subtotal to check against means nothing to reconcile, same as on arrival.
+  const pendingGap = pendingSubtotalCents
+    ? pendingItemsCents - pendingSubtotalCents
+    : 0
   // Whatever the gap isn't explained by the tax and tip the user entered.
   const unexplained = amountCents - itemsTotalCents - taxCents - tipCents
   const unexplainedLabel =
@@ -1475,30 +1506,51 @@ export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
       {pending && (
         <fieldset className="participants receipt">
           <legend>check this scan</legend>
-          <p className="error">
-            These items add up to {money(pending.items_total_cents)}, but the
-            receipt&rsquo;s subtotal reads {money(pending.subtotal_cents)} —{' '}
-            {money(Math.abs(pending.items_total_cents - pending.subtotal_cents))}{' '}
-            {pending.items_total_cents > pending.subtotal_cents ? 'over' : 'short'}
-            . Something was probably misread.
-          </p>
-          <ul className="list">
-            {pending.items.map((it, i) => (
-              <li key={i} className="row static">
-                <span>{it.name || 'item'}</span>
-                <span>{money(it.price_cents)}</span>
-              </li>
-            ))}
-          </ul>
+          {pendingGap === 0 ? (
+            <p className="muted">
+              These items add up to {money(pendingItemsCents)}, matching the
+              subtotal.
+            </p>
+          ) : (
+            <p className="error">
+              These items add up to {money(pendingItemsCents)}, but the
+              receipt&rsquo;s subtotal reads {money(pendingSubtotalCents)} —{' '}
+              {money(Math.abs(pendingGap))}{' '}
+              {pendingGap > 0 ? 'over' : 'short'}. Fix whichever one is wrong,
+              or use it as it is.
+            </p>
+          )}
+          <ReceiptEditor
+            legend="scanned items"
+            items={pending.items}
+            setItems={(update) =>
+              setPending((p) => ({
+                ...p,
+                items: typeof update === 'function' ? update(p.items) : update,
+              }))
+            }
+            // Claiming comes after the receipt is right, in the form proper.
+            participants={[]}
+          />
+          <label className="field">
+            subtotal printed on the receipt
+            <input
+              inputMode="decimal"
+              placeholder="0.00"
+              value={pending.subtotal}
+              onChange={(e) =>
+                setPending((p) => ({ ...p, subtotal: e.target.value }))
+              }
+            />
+          </label>
           <p className="muted">
-            subtotal {money(pending.subtotal_cents)}
-            {pending.tax_cents ? ` · tax ${money(pending.tax_cents)}` : ''}
-            {pending.tip_cents ? ` · tip ${money(pending.tip_cents)}` : ''} · total{' '}
-            {money(pending.total_cents)}
+            {pending.tax ? `tax ${money(toCents(pending.tax))} · ` : ''}
+            {pending.tip ? `tip ${money(toCents(pending.tip))} · ` : ''}
+            total {money(toCents(pending.total))} (editable once you use it)
           </p>
           <div className="row-actions">
-            <button type="button" onClick={() => applyScan(pending)}>
-              use it anyway
+            <button type="button" onClick={() => applyDraft(pending)}>
+              {pendingGap === 0 ? 'use these items' : 'use them anyway'}
             </button>
             <button
               type="button"
