@@ -17,7 +17,16 @@ import {
 
 // A server that stores what it is given and verifies signatures for real.
 function fakeServer() {
-  const state = { users: {}, devices: {}, wraps: {}, session: null, challenges: {} }
+  const state = {
+    users: {},
+    devices: {},
+    wraps: {},
+    session: null,
+    challenges: {},
+    // group id -> [{recipient_kind, recipient_id, ciphertext}]
+    groupKeys: {},
+    groups: [],
+  }
   const json = (body) => ({ ok: true, json: async () => body })
   const fail = (status, detail) => ({
     ok: false,
@@ -33,6 +42,7 @@ function fakeServer() {
       if (state.users[body.login_handle]) return fail(409, 'taken')
       state.users[body.login_handle] = {
         id: Object.keys(state.users).length + 1,
+        device_id: 'd1',
         ...body,
       }
       state.wraps[body.login_handle] = body.wraps
@@ -85,7 +95,32 @@ function fakeServer() {
       )
       if (!ok) return fail(401, 'bad signature')
       state.devices[body.pubkey] = { handle: owner.login_handle, revoked: false }
+      owner.device_id = 'd2'
       return json({ device_id: 'd2' })
+    }
+    if (path === 'groups' && !body) {
+      return json(state.groups)
+    }
+    if (path === 'account/box') {
+      const u = state.users[state.session]
+      return json({ account_box_pubkey: u.account_box_pubkey })
+    }
+    if (path.startsWith('groups/') && path.endsWith('/keys')) {
+      const gid = Number(path.split('/')[1])
+      const rows = state.groupKeys[gid] ?? []
+      if (options?.method === 'POST' || body) {
+        state.groupKeys[gid] = [...rows, ...body.keys]
+        return json({ ok: true })
+      }
+      // Only rows addressed to the caller's own device/account, as the server
+      // does — otherwise a test could 'succeed' by reading someone else's.
+      const u = state.users[state.session]
+      const mine = rows.filter(
+        (r) =>
+          (r.recipient_kind === 'account' && r.recipient_id === String(u.id)) ||
+          (r.recipient_kind === 'device' && r.recipient_id === u.device_id)
+      )
+      return json({ keys: mine })
     }
     if (path === 'me') {
       if (!state.session) return fail(401, 'not logged in')
@@ -94,6 +129,7 @@ function fakeServer() {
         id: u.id,
         login_handle: u.login_handle,
         display_name: u.display_name,
+        device_id: u.device_id,
       })
     }
     if (path === 'logout') {

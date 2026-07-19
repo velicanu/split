@@ -43,6 +43,7 @@ def enrolled(handle, display=None):
             "login_handle": handle,
             "display_name": display or handle,
             "account_pubkey": acct_pub,
+            "account_box_pubkey": b64(b"acct-box-" + handle.encode()),
             "device_pubkey": dev_pub,
             "box_pubkey": b64(b"box-" + handle.encode()),
             "label": "first device",
@@ -180,6 +181,7 @@ def test_login_handle_must_be_unique_display_name_need_not_be():
             "login_handle": "taken-handle",
             "display_name": "Someone",
             "account_pubkey": acct_pub,
+            "account_box_pubkey": "abox",
             "device_pubkey": dev_pub,
             "box_pubkey": "box",
         },
@@ -198,12 +200,17 @@ def test_signup_validation():
         "login_handle": "x",
         "display_name": "x",
         "account_pubkey": pub,
+        "account_box_pubkey": "abox",
         "device_pubkey": pub,
         "box_pubkey": "box",
     }
     assert c.post("/api/signup", json={**base, "login_handle": " "}).status_code == 400
     assert c.post("/api/signup", json={**base, "account_pubkey": ""}).status_code == 400
     assert c.post("/api/signup", json={**base, "box_pubkey": ""}).status_code == 400
+    assert (
+        c.post("/api/signup", json={**base, "account_box_pubkey": ""}).status_code
+        == 400
+    )
 
 
 def test_wraps_are_public_but_useless_and_do_not_leak_which_handles_exist():
@@ -484,3 +491,170 @@ def test_init_db_actually_rebuilds_a_stale_database():
         r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     assert {"devices", "key_wraps", "challenges"} <= tables
+
+
+def test_group_keys_reach_only_their_recipient():
+    owner, _, _ = enrolled("gk-owner")
+    gid = owner.post("/api/groups", json={"name": "Trip"}).json()["id"]
+    me = owner.get("/api/me").json()
+
+    r = owner.post(
+        f"/api/groups/{gid}/keys",
+        json={
+            "keys": [
+                {
+                    "recipient_kind": "device",
+                    "recipient_id": me["device_id"],
+                    "ciphertext": "sealed-to-device",
+                },
+                {
+                    "recipient_kind": "account",
+                    "recipient_id": str(me["id"]),
+                    "ciphertext": "sealed-to-account",
+                },
+            ]
+        },
+    )
+    assert r.status_code == 200
+
+    got = owner.get(f"/api/groups/{gid}/keys").json()["keys"]
+    assert {k["ciphertext"] for k in got} == {"sealed-to-device", "sealed-to-account"}
+
+    # A second member of the same group sees none of them: the rows are
+    # addressed to the owner's keys, and handing them over would be pointless
+    # anyway (they are sealed) but would leak who holds what.
+    other = signed_up_in_group(owner, gid, "gk-other")
+    assert other.get(f"/api/groups/{gid}/keys").json()["keys"] == []
+
+    # A non-member cannot even ask.
+    stranger, _, _ = enrolled("gk-stranger")
+    assert stranger.get(f"/api/groups/{gid}/keys").status_code == 404
+
+
+def signed_up_in_group(owner, gid, handle):
+    code = owner.get(f"/api/groups/{gid}").json()["code"]
+    c, _, _ = enrolled(handle)
+    c.post("/api/groups/join", json={"code": code})
+    return c
+
+
+def test_you_can_only_store_group_keys_for_yourself():
+    owner, _, _ = enrolled("gk-mine")
+    gid = owner.post("/api/groups", json={"name": "Flat"}).json()["id"]
+    other = signed_up_in_group(owner, gid, "gk-theirs")
+    victim = other.get("/api/me").json()
+
+    # Planting a key row aimed at another member is refused, even though we are
+    # both in the group.
+    r = owner.post(
+        f"/api/groups/{gid}/keys",
+        json={
+            "keys": [
+                {
+                    "recipient_kind": "device",
+                    "recipient_id": victim["device_id"],
+                    "ciphertext": "planted",
+                }
+            ]
+        },
+    )
+    assert r.status_code == 403
+    assert other.get(f"/api/groups/{gid}/keys").json()["keys"] == []
+
+    # Nor aimed at another account.
+    r = owner.post(
+        f"/api/groups/{gid}/keys",
+        json={
+            "keys": [
+                {
+                    "recipient_kind": "account",
+                    "recipient_id": str(victim["id"]),
+                    "ciphertext": "planted",
+                }
+            ]
+        },
+    )
+    assert r.status_code == 403
+
+
+def test_group_key_validation_and_access():
+    owner, _, _ = enrolled("gk-valid")
+    gid = owner.post("/api/groups", json={"name": "V"}).json()["id"]
+    me = owner.get("/api/me").json()
+
+    def post(key):
+        return owner.post(f"/api/groups/{gid}/keys", json={"keys": [key]}).status_code
+
+    good = {
+        "recipient_kind": "device",
+        "recipient_id": me["device_id"],
+        "ciphertext": "x",
+    }
+    assert post({**good, "recipient_kind": "nonsense"}) == 400
+    assert post({**good, "ciphertext": ""}) == 400
+
+    stranger, _, _ = enrolled("gk-outsider")
+    assert (
+        stranger.post(f"/api/groups/{gid}/keys", json={"keys": [good]}).status_code
+        == 404
+    )
+
+    anon = client()
+    assert anon.get(f"/api/groups/{gid}/keys").status_code == 401
+    assert anon.get("/api/account/box").status_code == 401
+
+
+def test_the_account_box_key_comes_back_for_re_sealing():
+    c, _, _ = enrolled("boxy")
+    assert c.get("/api/account/box").json()["account_box_pubkey"].startswith("YWNjdC1")
+
+
+def test_a_revoked_device_stops_receiving_group_keys():
+    owner, _, (own_priv, own_pub) = enrolled("gk-revoke")
+    gid = owner.post("/api/groups", json={"name": "R"}).json()["id"]
+    me = owner.get("/api/me").json()
+    owner.post(
+        f"/api/groups/{gid}/keys",
+        json={
+            "keys": [
+                {
+                    "recipient_kind": "device",
+                    "recipient_id": me["device_id"],
+                    "ciphertext": "sealed",
+                }
+            ]
+        },
+    )
+
+    second_priv, second_pub = keypair()
+    owner.post(
+        "/api/devices",
+        json={
+            "pubkey": second_pub,
+            "box_pubkey": "b2",
+            "label": "phone",
+            "signed_by": "device",
+            "signer_pubkey": own_pub,
+            "signature": b64(own_priv.sign(second_pub.encode())),
+        },
+    )
+    phone = client()
+    sign_in(phone, second_priv, second_pub)
+    phone_id = phone.get("/api/me").json()["device_id"]
+    phone.post(
+        f"/api/groups/{gid}/keys",
+        json={
+            "keys": [
+                {
+                    "recipient_kind": "device",
+                    "recipient_id": phone_id,
+                    "ciphertext": "sealed-to-phone",
+                }
+            ]
+        },
+    )
+    assert len(owner.get(f"/api/groups/{gid}/keys").json()["keys"]) == 2
+
+    owner.delete(f"/api/devices/{phone_id}")
+    remaining = owner.get(f"/api/groups/{gid}/keys").json()["keys"]
+    assert [k["ciphertext"] for k in remaining] == ["sealed"]

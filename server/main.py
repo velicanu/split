@@ -26,7 +26,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def reset_if_stale(conn):
@@ -68,7 +68,11 @@ def init_db():
             " id INTEGER PRIMARY KEY,"
             " login_handle TEXT UNIQUE NOT NULL,"
             " display_name TEXT NOT NULL,"
-            " account_pubkey TEXT NOT NULL)"
+            " account_pubkey TEXT NOT NULL,"
+            # X25519, so group keys can be sealed to the account for the
+            # no-live-device enrolment path. Distinct from account_pubkey,
+            # which is Ed25519 and only ever signs.
+            " account_box_pubkey TEXT NOT NULL)"
         )
         # The account private key, encrypted client-side. Opaque here.
         conn.execute(
@@ -91,6 +95,20 @@ def init_db():
             " label TEXT NOT NULL,"
             " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
             " revoked_at TEXT)"
+        )
+        # A group's symmetric key, sealed to one recipient. The server relays
+        # these without being able to open any of them: sealing is anonymous
+        # X25519, so only the holder of the matching secret key can read one.
+        # Rows are always self-authored — you seal the key you already have to
+        # your own account and devices. Nobody wraps a key for anyone else,
+        # because an invite link carries it in the URL fragment instead.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS group_keys ("
+            " group_id INTEGER NOT NULL REFERENCES groups(id),"
+            " recipient_kind TEXT NOT NULL,"
+            " recipient_id TEXT NOT NULL,"
+            " ciphertext TEXT NOT NULL,"
+            " PRIMARY KEY (group_id, recipient_kind, recipient_id))"
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS challenges ("
@@ -183,6 +201,7 @@ class SignupIn(BaseModel):
     login_handle: str
     display_name: str
     account_pubkey: str
+    account_box_pubkey: str
     device_pubkey: str
     box_pubkey: str
     label: str = "this device"
@@ -328,14 +347,21 @@ def signup(body: SignupIn, response: Response):
     display = body.display_name.strip() or handle
     if not handle:
         raise HTTPException(400, "login handle required")
-    if not body.account_pubkey or not body.device_pubkey or not body.box_pubkey:
+    if not all(
+        [
+            body.account_pubkey,
+            body.account_box_pubkey,
+            body.device_pubkey,
+            body.box_pubkey,
+        ]
+    ):
         raise HTTPException(400, "keys required")
     try:
         with db() as conn:
             cur = conn.execute(
-                "INSERT INTO users (login_handle, display_name, account_pubkey)"
-                " VALUES (?, ?, ?)",
-                (handle, display, body.account_pubkey),
+                "INSERT INTO users (login_handle, display_name, account_pubkey,"
+                " account_box_pubkey) VALUES (?, ?, ?, ?)",
+                (handle, display, body.account_pubkey, body.account_box_pubkey),
             )
             user_id = cur.lastrowid
             device_id = secrets.token_urlsafe(12)
@@ -642,6 +668,86 @@ def get_events(group_id: int, request: Request, since: int = 0):
         e["payload"] = json.loads(e["payload"])
         events.append(e)
     return {"version": version, "events": events}
+
+
+class GroupKeysIn(BaseModel):
+    keys: list[dict]
+
+
+@app.get("/api/groups/{group_id}/keys")
+def get_group_keys(group_id: int, request: Request):
+    """The group key, sealed to me. Several rows: one per device, plus one to
+    the account for the enrol-with-no-device path."""
+    user = require_user(request)
+    with db() as conn:
+        require_member(conn, group_id, user["id"])
+        mine = [str(user["id"])]
+        devices = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL",
+                (user["id"],),
+            ).fetchall()
+        ]
+        rows = conn.execute(
+            "SELECT recipient_kind, recipient_id, ciphertext FROM group_keys"
+            " WHERE group_id = ?",
+            (group_id,),
+        ).fetchall()
+    keep = [
+        dict(r)
+        for r in rows
+        if (r["recipient_kind"] == "account" and r["recipient_id"] in mine)
+        or (r["recipient_kind"] == "device" and r["recipient_id"] in devices)
+    ]
+    return {"keys": keep}
+
+
+@app.post("/api/groups/{group_id}/keys")
+def put_group_keys(group_id: int, body: GroupKeysIn, request: Request):
+    """Store the group key sealed to my own account or devices.
+
+    You may only address yourself. Nobody wraps a key for anyone else — an
+    invite link carries it in the URL fragment instead — so accepting a row
+    aimed at another user would be handing them a key they never asked for,
+    and a way to plant one."""
+    user = require_user(request)
+    with db() as conn:
+        require_member(conn, group_id, user["id"])
+        my_devices = {
+            r["id"]
+            for r in conn.execute(
+                "SELECT id FROM devices WHERE user_id = ?", (user["id"],)
+            ).fetchall()
+        }
+        for k in body.keys:
+            kind = k.get("recipient_kind")
+            rid = str(k.get("recipient_id", ""))
+            ciphertext = k.get("ciphertext")
+            if not ciphertext or kind not in ("account", "device"):
+                raise HTTPException(400, "malformed key")
+            mine = rid == str(user["id"]) if kind == "account" else rid in my_devices
+            if not mine:
+                raise HTTPException(403, "you can only store keys for yourself")
+            conn.execute(
+                "INSERT OR REPLACE INTO group_keys"
+                " (group_id, recipient_kind, recipient_id, ciphertext)"
+                " VALUES (?, ?, ?, ?)",
+                (group_id, kind, rid, ciphertext),
+            )
+    return {"ok": True}
+
+
+@app.get("/api/account/box")
+def my_box_key(request: Request):
+    """This account's X25519 public key, so a freshly enrolled device can seal
+    group keys back to the account it just unlocked."""
+    user = require_user(request)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT account_box_pubkey FROM users WHERE id = ?", (user["id"],)
+        ).fetchone()
+    return {"account_box_pubkey": row["account_box_pubkey"]}
 
 
 # Raster only, and served with nosniff below: an uploaded SVG rendered from our
