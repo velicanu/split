@@ -6,7 +6,10 @@ import { afterEach, describe, test } from 'node:test'
 
 import { GroupView } from '../src/App.jsx'
 import {
+  contentId,
+  decryptBytes,
   decryptPayload,
+  encryptBytes,
   encryptPayload,
   generateDeviceKey,
   generateGroupKey,
@@ -14,6 +17,7 @@ import {
   sealTo,
 } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
+import { forgetReceipts } from '../src/receipts.js'
 import {
   $,
   $$,
@@ -52,14 +56,29 @@ const MODEL_REPLY = {
 // rather than stepping around it.
 async function fakeApi({ seed = [] } = {}) {
   forgetGroupKeys()
+  forgetReceipts()
   const device = await generateDeviceKey()
   await saveDeviceKey(device)
   const key = await generateGroupKey()
   const sealedKey = await sealTo(device.box_pubkey, key)
 
+  // Seeded expenses may reference receipts; those blobs have to exist, sealed
+  // under this group's key, or a re-scan has nothing to read.
+  const blobs = new Map()
   const encSeed = []
   for (const e of seed) {
-    encSeed.push({ ...e, payload: { enc: await encryptPayload(key, e.payload) } })
+    const payload = { ...e.payload }
+    if (payload.receipts) {
+      const ids = []
+      for (const _ of payload.receipts) {
+        const bytes = await encryptBytes(key, new Uint8Array([9, 8, 7]))
+        const id = await contentId(bytes)
+        blobs.set(id, bytes)
+        ids.push(id)
+      }
+      payload.receipts = ids
+    }
+    encSeed.push({ ...e, payload: { enc: await encryptPayload(key, payload) } })
   }
 
   const state = {
@@ -72,9 +91,16 @@ async function fakeApi({ seed = [] } = {}) {
     posted: [],
     // Exactly what went over the wire, before any decryption.
     raw: [],
+    // receipt id -> ciphertext bytes, as the server would hold them
+    blobs,
     uploads: 0,
   }
   const json = (body) => ({ ok: true, json: async () => body })
+  const fail = (status, detail) => ({
+    ok: false,
+    status,
+    json: async () => ({ detail }),
+  })
 
   globalThis.fetch = async (url, options) => {
     const path = String(url)
@@ -106,10 +132,19 @@ async function fakeApi({ seed = [] } = {}) {
     }
     if (path.endsWith('/receipts')) {
       state.uploads += 1
-      return json({ receipt_id: `r${state.uploads}` })
+      // Verify the content hash exactly as the server does, so a client that
+      // mislabels a blob fails here rather than silently.
+      const bytes = Uint8Array.from(atob(body.ciphertext), (c) => c.charCodeAt(0))
+      const id = await contentId(bytes)
+      if (id !== body.receipt_id) return fail(400, 'id is not the hash')
+      state.blobs.set(body.receipt_id, bytes)
+      return json({ receipt_id: body.receipt_id })
     }
-    if (path.startsWith('/api/receipts/')) {
-      return { ok: true, blob: async () => ({ name: 'stored.jpg' }) }
+    if (path.includes('/receipts/')) {
+      const id = path.split('/receipts/')[1]
+      const bytes = state.blobs.get(id)
+      if (!bytes) return { ok: false, status: 404, json: async () => ({}) }
+      return { ok: true, arrayBuffer: async () => bytes.buffer.slice(0) }
     }
     if (path.match(/\/api\/groups\/\d+$/)) {
       return json({ id: 7, name: 'Trip', code: 'abc' })
@@ -146,7 +181,8 @@ describe('creating an expense with a receipt', () => {
     await fillAndSubmit()
 
     const created = api.posted.find((e) => e.type === 'expense.created')
-    assert.deepEqual(created.payload.receipts, ['r1'])
+    assert.deepEqual(created.payload.receipts, [...api.blobs.keys()])
+    assert.match(created.payload.receipts[0], /^[0-9a-f]{64}$/)
   })
 
   test('clears the form once the expense is filed', async () => {
@@ -173,7 +209,7 @@ describe('creating an expense with a receipt', () => {
     await fillAndSubmit({ description: 'Second' })
 
     const [first, second] = api.posted
-    assert.deepEqual(first.payload.receipts, ['r1'])
+    assert.deepEqual(first.payload.receipts, [...api.blobs.keys()])
     assert.deepEqual(second.payload.receipts, [])
   })
 })
@@ -230,12 +266,16 @@ describe('the receipt on an existing expense', () => {
     await click(byText('button', 'delete'))
     const deleted = api.posted.at(-1).payload
     assert.equal(deleted.deleted, true)
-    assert.deepEqual(deleted.receipts, ['stored-1'], 'delete must keep receipts')
+    assert.deepEqual(
+      deleted.receipts,
+      [...api.blobs.keys()],
+      'delete must keep receipts'
+    )
 
     await click(byText('button', 'restore'))
     const restored = api.posted.at(-1).payload
     assert.equal(restored.deleted, false)
-    assert.deepEqual(restored.receipts, ['stored-1'])
+    assert.deepEqual(restored.receipts, [...api.blobs.keys()])
   })
 
   test('keeps its split recipe through a delete', async () => {

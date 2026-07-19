@@ -135,52 +135,128 @@ def test_requires_auth():
     assert anon.get("/api/ai/settings").status_code == 401
 
 
-PNG = (
-    "data:image/png;base64,"
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-)
+def sealed(payload=b"pretend ciphertext"):
+    """A blob and the id it must be stored under."""
+    import hashlib
+
+    return base64.b64encode(payload).decode(), hashlib.blake2b(
+        payload, digest_size=32
+    ).hexdigest()
 
 
 def test_receipt_upload_and_fetch():
     owner = signed_up("rcpt-owner")
     group = owner.post("/api/groups", json={"name": "Trip"}).json()
     gid = group["id"]
+    ciphertext, rid = sealed()
 
-    r = owner.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG})
+    r = owner.post(
+        f"/api/groups/{gid}/receipts",
+        json={"receipt_id": rid, "ciphertext": ciphertext},
+    )
     assert r.status_code == 200
-    rid = r.json()["receipt_id"]
+    assert r.json()["receipt_id"] == rid
 
-    got = owner.get(f"/api/receipts/{rid}")
+    got = owner.get(f"/api/groups/{gid}/receipts/{rid}")
     assert got.status_code == 200
-    assert got.headers["content-type"] == "image/png"
+    # Opaque bytes: the server has no idea this is an image, and must not
+    # invite a browser to guess either.
+    assert got.headers["content-type"] == "application/octet-stream"
     assert got.headers["x-content-type-options"] == "nosniff"
-    assert got.content == base64.b64decode(PNG.split(",", 1)[1])
+    assert got.content == base64.b64decode(ciphertext)
 
-    # every member of the group can see it
+    # every member of the group can fetch it
     other = signed_up("rcpt-member")
     other.post("/api/groups/join", json={"code": group["code"]})
-    assert other.get(f"/api/receipts/{rid}").status_code == 200
+    assert other.get(f"/api/groups/{gid}/receipts/{rid}").status_code == 200
+
+
+def test_a_receipt_id_must_be_the_hash_of_its_content():
+    """Content addressing is only worth anything if the server checks it —
+    otherwise an id says nothing about what you will get back."""
+    u = signed_up("rcpt-hash")
+    gid = u.post("/api/groups", json={"name": "H"}).json()["id"]
+    ciphertext, rid = sealed()
+
+    wrong = u.post(
+        f"/api/groups/{gid}/receipts",
+        json={"receipt_id": "0" * 64, "ciphertext": ciphertext},
+    )
+    assert wrong.status_code == 400
+    assert u.get(f"/api/groups/{gid}/receipts/" + "0" * 64).status_code == 404
+
+    # And the id cannot be borrowed for different content.
+    other_ciphertext, _ = sealed(b"different bytes entirely")
+    assert (
+        u.post(
+            f"/api/groups/{gid}/receipts",
+            json={"receipt_id": rid, "ciphertext": other_ciphertext},
+        ).status_code
+        == 400
+    )
+
+
+def test_uploading_the_same_receipt_twice_is_a_no_op():
+    u = signed_up("rcpt-dup")
+    gid = u.post("/api/groups", json={"name": "D"}).json()["id"]
+    ciphertext, rid = sealed()
+    body = {"receipt_id": rid, "ciphertext": ciphertext}
+
+    assert u.post(f"/api/groups/{gid}/receipts", json=body).status_code == 200
+    assert u.post(f"/api/groups/{gid}/receipts", json=body).status_code == 200
+    assert u.get(f"/api/groups/{gid}/receipts/{rid}").content == base64.b64decode(
+        ciphertext
+    )
+
+
+def test_two_groups_can_hold_identical_bytes_independently():
+    """An id says what a blob *is*, not who may read it. Keyed on content
+    alone, the second group's upload would collapse into the first group's row
+    and its members would be locked out of their own receipt."""
+    ciphertext, rid = sealed(b"byte-for-byte identical")
+
+    a = signed_up("rcpt-group-a")
+    gid_a = a.post("/api/groups", json={"name": "A"}).json()["id"]
+    b = signed_up("rcpt-group-b")
+    gid_b = b.post("/api/groups", json={"name": "B"}).json()["id"]
+
+    body = {"receipt_id": rid, "ciphertext": ciphertext}
+    assert a.post(f"/api/groups/{gid_a}/receipts", json=body).status_code == 200
+    assert b.post(f"/api/groups/{gid_b}/receipts", json=body).status_code == 200
+
+    assert a.get(f"/api/groups/{gid_a}/receipts/{rid}").status_code == 200
+    assert b.get(f"/api/groups/{gid_b}/receipts/{rid}").status_code == 200
+    # And neither can reach into the other's group by knowing the address.
+    assert a.get(f"/api/groups/{gid_b}/receipts/{rid}").status_code == 404
+    assert b.get(f"/api/groups/{gid_a}/receipts/{rid}").status_code == 404
 
 
 def test_receipts_are_private_to_the_group():
     owner = signed_up("rcpt-private")
     gid = owner.post("/api/groups", json={"name": "Flat"}).json()["id"]
-    rid = owner.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG}).json()[
-        "receipt_id"
-    ]
+    ciphertext, rid = sealed()
+    owner.post(
+        f"/api/groups/{gid}/receipts",
+        json={"receipt_id": rid, "ciphertext": ciphertext},
+    )
 
     stranger = signed_up("rcpt-stranger")
-    assert stranger.get(f"/api/receipts/{rid}").status_code == 404
-    # and a non-member cannot upload into someone else's group
+    assert stranger.get(f"/api/groups/{gid}/receipts/{rid}").status_code == 404
     assert (
-        stranger.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG}).status_code
+        stranger.post(
+            f"/api/groups/{gid}/receipts",
+            json={"receipt_id": rid, "ciphertext": ciphertext},
+        ).status_code
         == 404
     )
 
     anon = TestClient(app, base_url="https://testserver")
-    assert anon.get(f"/api/receipts/{rid}").status_code == 401
+    assert anon.get(f"/api/groups/{gid}/receipts/{rid}").status_code == 401
     assert (
-        anon.post(f"/api/groups/{gid}/receipts", json={"data_url": PNG}).status_code
+        anon.post(
+            f"/api/groups/{gid}/receipts",
+            json={"receipt_id": rid, "ciphertext": ciphertext},
+        ).status_code
         == 401
     )
 
@@ -189,23 +265,27 @@ def test_receipt_upload_validation():
     u = signed_up("rcpt-validate")
     gid = u.post("/api/groups", json={"name": "V"}).json()["id"]
 
-    def post(data_url):
+    def post(receipt_id, ciphertext):
         return u.post(
-            f"/api/groups/{gid}/receipts", json={"data_url": data_url}
+            f"/api/groups/{gid}/receipts",
+            json={"receipt_id": receipt_id, "ciphertext": ciphertext},
         ).status_code
 
-    assert post("not-a-data-url") == 400
-    assert post("data:image/png,notbase64") == 400
-    # An SVG served from our own origin would be stored XSS, so raster only.
-    assert post("data:image/svg+xml;base64,PHN2Zy8+") == 400
-    assert post("data:text/html;base64,PGgxPmhpPC9oMT4=") == 400
-    assert post("data:image/png;base64,not valid base64!!") == 400
-    assert post("data:image/png;base64,") == 400
+    assert post("x", "not valid base64!!") == 400
+    assert post("x", "") == 400
 
-    oversized = base64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode()
-    assert post(f"data:image/png;base64,{oversized}") == 413
+    import hashlib
 
-    assert u.get("/api/receipts/nope").status_code == 404
+    oversized = b"x" * (8 * 1024 * 1024 + 1)
+    assert (
+        post(
+            hashlib.blake2b(oversized, digest_size=32).hexdigest(),
+            base64.b64encode(oversized).decode(),
+        )
+        == 413
+    )
+
+    assert u.get(f"/api/groups/{gid}/receipts/nope").status_code == 404
 
 
 def test_ai_provider_settings():

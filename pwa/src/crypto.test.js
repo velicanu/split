@@ -4,7 +4,10 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import {
+  contentId,
+  decryptBytes,
   decryptPayload,
+  encryptBytes,
   encryptPayload,
   generateAccountKey,
   generateDeviceKey,
@@ -109,5 +112,66 @@ describe('payloads', () => {
     const key = await generateGroupKey()
     await assert.rejects(() => decryptPayload(key, 'nonsense'), /Malformed/)
     await assert.rejects(() => decryptPayload(key, ''), /Malformed/)
+  })
+})
+
+describe('receipt blobs', () => {
+  const image = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5])
+
+  test('encrypt and decrypt round trip', async () => {
+    const key = await generateGroupKey()
+    const sealed = await encryptBytes(key, image)
+    assert.deepEqual([...(await decryptBytes(key, sealed))], [...image])
+  })
+
+  test('the ciphertext does not start with the image', async () => {
+    // A JPEG's magic bytes would otherwise announce what every blob is.
+    const key = await generateGroupKey()
+    const sealed = await encryptBytes(key, image)
+    assert.notDeepEqual([...sealed.slice(0, 4)], [...image.slice(0, 4)])
+  })
+
+  test('the wrong key cannot read it', async () => {
+    const sealed = await encryptBytes(await generateGroupKey(), image)
+    const other = await generateGroupKey()
+    await assert.rejects(() => decryptBytes(other, sealed), /Could not decrypt/)
+  })
+
+  test('a truncated blob is rejected rather than misread', async () => {
+    const key = await generateGroupKey()
+    await assert.rejects(
+      () => decryptBytes(key, new Uint8Array([1, 2, 3])),
+      /Malformed/
+    )
+  })
+
+  test('altered bytes are detected', async () => {
+    const key = await generateGroupKey()
+    const sealed = await encryptBytes(key, image)
+    sealed[sealed.length - 1] ^= 0xff
+    await assert.rejects(() => decryptBytes(key, sealed), /Could not decrypt/)
+  })
+})
+
+describe('content ids', () => {
+  test('are stable for the same bytes and differ for others', async () => {
+    const a = new Uint8Array([1, 2, 3])
+    const b = new Uint8Array([1, 2, 4])
+    assert.equal(await contentId(a), await contentId(a))
+    assert.notEqual(await contentId(a), await contentId(b))
+  })
+
+  test('are 32-byte hex, matching what the server computes', async () => {
+    assert.match(await contentId(new Uint8Array([1])), /^[0-9a-f]{64}$/)
+  })
+
+  test('differ for two encryptions of the same image', async () => {
+    // Fresh nonce per upload, so identical photos are not linkable by address.
+    const key = await generateGroupKey()
+    const image = new Uint8Array([1, 2, 3])
+    assert.notEqual(
+      await contentId(await encryptBytes(key, image)),
+      await contentId(await encryptBytes(key, image))
+    )
   })
 })
