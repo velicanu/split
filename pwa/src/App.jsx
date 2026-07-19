@@ -796,11 +796,17 @@ function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDele
                   (t, it) => t + (it.price_cents || 0),
                   0
                 )
-                const adj = expense.amount_cents - sub
+                const tax = expense.split.tax_cents || 0
+                const tip = expense.split.tip_cents || 0
+                const rest = expense.amount_cents - sub - tax - tip
+                const label =
+                  rest < 0 ? 'discount' : tax || tip ? 'other' : 'tax/tip'
                 return (
                   <p className="muted">
-                    items {money(sub)} · {adj >= 0 ? 'tax/tip' : 'discount'}{' '}
-                    {money(Math.abs(adj))}
+                    items {money(sub)}
+                    {tax ? ` · tax ${money(tax)}` : ''}
+                    {tip ? ` · tip ${money(tip)}` : ''}
+                    {rest !== 0 ? ` · ${label} ${money(Math.abs(rest))}` : ''}
                   </p>
                 )
               })()}
@@ -1178,6 +1184,14 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
     const inSplit = initial.splits.map((s) => s.user_id)
     return all.filter((id) => !inSplit.includes(id))
   })
+  // Tax and tip are recorded for information only — the split is driven by the
+  // item weights scaled to the total, so these never enter the maths.
+  const dollarsOr = (cents) => (cents ? (cents / 100).toFixed(2) : '')
+  const [tax, setTax] = useState(dollarsOr(initial?.split?.tax_cents))
+  const [tip, setTip] = useState(dollarsOr(initial?.split?.tip_cents))
+  // A scan whose items don't add up to the receipt's own subtotal, parked for
+  // the user to accept or throw away rather than silently filling the form.
+  const [pending, setPending] = useState(null)
   const [payerIds, setPayerIds] = useState(() =>
     initial ? initial.payers.map((p) => p.user_id) : [memberIdFor(members, me)]
   )
@@ -1193,6 +1207,23 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
   const toggle = (list, setList, id) =>
     setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
 
+  function applyScan(result) {
+    setItems(
+      result.items.map((it) => ({
+        id: crypto.randomUUID(),
+        name: it.name,
+        price: (it.price_cents / 100).toFixed(2),
+        claimed_by: [],
+      }))
+    )
+    setAmount((result.total_cents / 100).toFixed(2))
+    setTax(dollarsOr(result.tax_cents))
+    setTip(dollarsOr(result.tip_cents))
+    // A scan implies an itemised split, whatever mode you were in.
+    setMode('items')
+    setPending(null)
+  }
+
   // Scanned output is a *draft*: it fills the editable rows so the user can
   // fix OCR mistakes before anything is saved.
   async function scan(e) {
@@ -1203,6 +1234,7 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
     if (!config) return
     setScanning(true)
     setError('')
+    setPending(null)
     try {
       const result = await extractReceipt({
         provider: ai.active,
@@ -1210,17 +1242,10 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         model: config.model,
         file,
       })
-      setItems(
-        result.items.map((it) => ({
-          id: crypto.randomUUID(),
-          name: it.name,
-          price: (it.price_cents / 100).toFixed(2),
-          claimed_by: [],
-        }))
-      )
-      setAmount((result.total_cents / 100).toFixed(2))
-      // A scan implies an itemised split, whatever mode you were in.
-      setMode('items')
+      // Items that don't reconcile with the printed subtotal mean something
+      // was misread, so let the user look before it touches the form.
+      if (result.matches) applyScan(result)
+      else setPending(result)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -1276,7 +1301,14 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         .map(Number)
         .sort((a, b) => a - b)
         .map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
-      split = { mode: 'items', participants, items: parsed }
+      // Subtotal isn't stored — it's just the sum of the items.
+      split = {
+        mode: 'items',
+        participants,
+        items: parsed,
+        tax_cents: Math.round(parseFloat(tax) * 100) || 0,
+        tip_cents: Math.round(parseFloat(tip) * 100) || 0,
+      }
     } else {
       const w = {}
       for (const m of members) {
@@ -1353,7 +1385,12 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
     (t, it) => t + (Math.round(parseFloat(it.price) * 100) || 0),
     0
   )
-  const adjustment = amountCents - itemsTotalCents
+  const taxCents = Math.round(parseFloat(tax) * 100) || 0
+  const tipCents = Math.round(parseFloat(tip) * 100) || 0
+  // Whatever the gap isn't explained by the tax and tip the user entered.
+  const unexplained = amountCents - itemsTotalCents - taxCents - tipCents
+  const unexplainedLabel =
+    unexplained < 0 ? 'discount' : taxCents || tipCents ? 'other' : 'tax/tip'
 
   return (
     <form onSubmit={submit}>
@@ -1435,6 +1472,45 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         </label>
       )}
 
+      {pending && (
+        <fieldset className="participants receipt">
+          <legend>check this scan</legend>
+          <p className="error">
+            These items add up to {money(pending.items_total_cents)}, but the
+            receipt&rsquo;s subtotal reads {money(pending.subtotal_cents)} —{' '}
+            {money(Math.abs(pending.items_total_cents - pending.subtotal_cents))}{' '}
+            {pending.items_total_cents > pending.subtotal_cents ? 'over' : 'short'}
+            . Something was probably misread.
+          </p>
+          <ul className="list">
+            {pending.items.map((it, i) => (
+              <li key={i} className="row static">
+                <span>{it.name || 'item'}</span>
+                <span>{money(it.price_cents)}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="muted">
+            subtotal {money(pending.subtotal_cents)}
+            {pending.tax_cents ? ` · tax ${money(pending.tax_cents)}` : ''}
+            {pending.tip_cents ? ` · tip ${money(pending.tip_cents)}` : ''} · total{' '}
+            {money(pending.total_cents)}
+          </p>
+          <div className="row-actions">
+            <button type="button" onClick={() => applyScan(pending)}>
+              use it anyway
+            </button>
+            <button
+              type="button"
+              className="link danger"
+              onClick={() => setPending(null)}
+            >
+              discard scan
+            </button>
+          </div>
+        </fieldset>
+      )}
+
       {(mode === 'equal' || mode === 'items') && (
         <fieldset className="participants">
           <legend>{mode === 'items' ? 'on the receipt' : 'split between'}</legend>
@@ -1458,11 +1534,35 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
             setItems={setItems}
             participants={members.filter((m) => !excluded.includes(m.id))}
           />
+          <div className="cols">
+            <label className="field">
+              tax (optional)
+              <input
+                inputMode="decimal"
+                placeholder="0.00"
+                value={tax}
+                onChange={(e) => setTax(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              tip (optional)
+              <input
+                inputMode="decimal"
+                placeholder="0.00"
+                value={tip}
+                onChange={(e) => setTip(e.target.value)}
+              />
+            </label>
+          </div>
           {itemsTotalCents > 0 && (
             <p className="muted">
-              items {money(itemsTotalCents)} ·{' '}
-              {adjustment >= 0 ? 'tax/tip' : 'discount'}{' '}
-              {money(Math.abs(adjustment))} · total {money(amountCents)}
+              items {money(itemsTotalCents)}
+              {taxCents ? ` · tax ${money(taxCents)}` : ''}
+              {tipCents ? ` · tip ${money(tipCents)}` : ''}
+              {unexplained !== 0
+                ? ` · ${unexplainedLabel} ${money(Math.abs(unexplained))}`
+                : ''}{' '}
+              · total {money(amountCents)}
             </p>
           )}
         </>
