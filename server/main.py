@@ -24,8 +24,38 @@ def db():
     return conn
 
 
+# Bump whenever the schema changes shape. See reset_if_stale below: while we
+# are still in development this triggers a wipe, not a migration.
+SCHEMA_VERSION = 2
+
+
+def reset_if_stale(conn):
+    """Drop everything when the schema version moves.
+
+    No migrations until development is finished — WIP data is disposable. The
+    catch is that `CREATE TABLE IF NOT EXISTS` silently does nothing against an
+    older table, so without this a deployed database keeps its old columns and
+    the first INSERT fails at runtime. That is exactly what happened when
+    PR A shipped: the release notes said the data was dropped, but nothing
+    dropped it.
+
+    DESTRUCTIVE, and deliberately so. Remove this before there is data anyone
+    cares about, and write real migrations instead.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != SCHEMA_VERSION:
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        for (name,) in tables:
+            conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
 def init_db():
     with db() as conn:
+        reset_if_stale(conn)
         # No password material here at all. The server authenticates a signature
         # from a registered device key, so it holds nothing that could be used
         # to impersonate a user or decrypt their data.
@@ -808,5 +838,29 @@ def delete_provider(provider: str, request: Request):
     return {"ok": True}
 
 
+class AppStatics(StaticFiles):
+    """Serve the built PWA with cache headers that can't strand an old bundle.
+
+    Starlette sends no Cache-Control, so browsers fall back to heuristic
+    freshness and may reuse index.html for hours. Since index.html names the
+    content-hashed bundles, a stale copy runs old JavaScript against a new API —
+    which is what produced a wall of validation errors after PR A shipped.
+
+    The hashed assets are immutable by construction and can be cached forever;
+    everything that *points* at them must revalidate every time.
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        name = os.path.basename(str(full_path))
+        immutable = "/assets/" in str(full_path).replace(os.sep, "/")
+        response.headers["Cache-Control"] = (
+            "public, max-age=31536000, immutable"
+            if immutable and name != "index.html"
+            else "no-cache"
+        )
+        return response
+
+
 if os.path.isdir("static"):
-    app.mount("/", StaticFiles(directory="static", html=True), name="static")
+    app.mount("/", AppStatics(directory="static", html=True), name="static")
