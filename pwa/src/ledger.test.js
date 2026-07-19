@@ -193,7 +193,7 @@ const ev = (type, payload, author) => ({
   payload,
   author,
 })
-const member = (id, username) => ev('member.added', { user_id: id, username })
+const member = (id, display_name) => ev('member.added', { user_id: id, display_name })
 const expense = (expense_id, over = {}) =>
   ev('expense.created', {
     expense_id,
@@ -214,8 +214,8 @@ describe('computeState members', () => {
   test('collects members in order and ignores repeats', () => {
     const state = computeState([member(1, 'v'), member(2, 'd'), member(1, 'v')])
     assert.deepEqual(state.members, [
-      { id: 1, username: 'v' },
-      { id: 2, username: 'd' },
+      { id: 1, display_name: 'v' },
+      { id: 2, display_name: 'd' },
     ])
   })
 })
@@ -523,7 +523,7 @@ describe('simplify', () => {
   const bal = (entries) =>
     entries.map(([user_id, net_cents]) => ({
       user_id,
-      username: `u${user_id}`,
+      display_name: `u${user_id}`,
       net_cents,
     }))
 

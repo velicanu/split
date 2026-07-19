@@ -21,6 +21,7 @@ shared contract comes first because everything else conforms to it.
 | 08 | [PWA shell](08-pwa-shell.md) | React + Vite + vite-plugin-pwa: service-worker app-shell precache so the app opens offline, installability, and durable local storage. |
 | 09 | [AI features](09-ai-features.md) | Receipt scanning and natural-language split directives via a capability ladder (on-device → in-browser WebGPU → cloud), with consent gating. |
 | 10 | [Native apps (later)](10-native-apps.md) | Native clients that speak the same shared contract, reach the OS on-device AI, and resolve the App Store ↔ AGPL licensing tension. |
+| 11 | [Identity, devices & revocation](11-identity-and-devices.md) | The concrete slice under 06/07: challenge-signed auth with no server-side passwords, per-device keypairs, real device revocation, and the schema/endpoints/flows for each. |
 
 ## Cross-cutting principles
 

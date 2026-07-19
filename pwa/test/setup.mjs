@@ -53,6 +53,14 @@ for (const key of [
 // Lets React flush effects synchronously inside act().
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
+// jsdom has no IndexedDB, and device keys live there. Using a real
+// implementation rather than a stub means the key-storage path is genuinely
+// exercised — a device key that fails to persist is an account that vanishes.
+const { default: fakeIndexedDB } = await import('fake-indexeddb')
+const { default: FDBKeyRange } = await import('fake-indexeddb/lib/FDBKeyRange')
+globalThis.indexedDB = fakeIndexedDB
+globalThis.IDBKeyRange = FDBKeyRange
+
 // jsdom ships no canvas and no image decoding. prepareImage() only needs them
 // to turn a File into *some* data URL, so a stub is enough — the image bytes
 // never matter to a test, since the model response is always mocked.

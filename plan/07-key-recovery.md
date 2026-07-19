@@ -15,6 +15,25 @@ Don't back up private/group keys directly.
 
 This splits the problem into "where ciphertext lives" (easy) vs "the one recovery secret" (below).
 
+## v1 decision: re-invite is the recovery story
+
+**Decided:** there is no recovery phrase in v1. If a user loses every device *and* their password,
+they make a **new account** and get re-invited to each group, with a `member.merged` event mapping
+the old member id to the new one (see [11](11-identity-and-devices.md)).
+
+This works only because we do not rotate group keys — one group key decrypts the entire history, so
+a re-invited user gets everything back rather than only events from now on.
+
+What it costs: a re-invite per group, and a new `login_handle` (the old one stays taken —
+releasing it would mean proving you owned it, which is the identity problem we are dodging). What
+stays broken: solo groups, or a group where everyone lost their keys. Nobody left to vouch.
+
+Day-to-day durability comes from the **password-wrapped account key** on the server, not from the
+ladder below: password managers persist passwords reliably, and the wrap blob means IndexedDB
+eviction costs a cache rather than an account.
+
+The ladder below remains the intended end state, not the v1 build.
+
 ## The ladder (layered, no single point of failure)
 
 1. **Passkey + WebAuthn PRF (primary)** — the closest thing to platform-synced backup on the web.

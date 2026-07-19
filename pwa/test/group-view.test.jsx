@@ -40,8 +40,8 @@ const MODEL_REPLY = {
 function fakeApi({ seed = [] } = {}) {
   const state = {
     events: [
-      { id: 1, type: 'member.added', payload: { user_id: 1, username: 'v' } },
-      { id: 2, type: 'member.added', payload: { user_id: 2, username: 'd' } },
+      { id: 1, type: 'member.added', payload: { user_id: 1, display_name: 'v' } },
+      { id: 2, type: 'member.added', payload: { user_id: 2, display_name: 'd' } },
       ...seed,
     ],
     posted: [],
@@ -82,7 +82,7 @@ function fakeApi({ seed = [] } = {}) {
 }
 
 const open = (ai = AI) =>
-  mount(<GroupView groupId={7} me={{ username: 'v' }} ai={ai} onBack={() => {}} />)
+  mount(<GroupView groupId={7} me={{ id: 1, display_name: 'v' }} ai={ai} onBack={() => {}} />)
 
 const addForm = () => byText('h3', 'Add an expense')?.closest('form')
 const descriptionField = () => addForm().querySelector('input')
