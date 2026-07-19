@@ -649,3 +649,207 @@ describe('the whole pipeline', () => {
     assert.deepEqual(net, { 1: 0, 2: 0, 3: 0 })
   })
 })
+
+describe('merging a member into their new account', () => {
+  // Losing every device means starting a new account. A merge reattaches the
+  // old identity's history to the new one; see plan/07 and plan/11.
+  const merged = (old_member_id, new_member_id) =>
+    ev('member.merged', { old_member_id, new_member_id })
+
+  const base = () => [member(1, 'v'), member(2, 'd'), member(3, 'd-again')]
+
+  test('the old identity stops being a separate person', () => {
+    const state = computeState([...base(), merged(2, 3)])
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 3]
+    )
+    assert.equal(state.balances.length, 2)
+  })
+
+  test('what they owed follows them', () => {
+    const state = computeState([...base(), expense('e1'), merged(2, 3)])
+    // The expense split 1000 between members 1 and 2; 2 is now 3.
+    assert.equal(netOf(state, 1), 500)
+    assert.equal(netOf(state, 3), -500)
+    assert.equal(
+      state.balances.reduce((t, b) => t + b.net_cents, 0),
+      0
+    )
+  })
+
+  test('what they paid follows them too', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1', {
+        payers: [{ user_id: 2, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: 2, share_cents: 500 },
+        ],
+      }),
+      merged(2, 3),
+    ])
+    assert.equal(netOf(state, 3), 500)
+    assert.equal(netOf(state, 1), -500)
+  })
+
+  test('an expense naming both identities sums rather than overwrites', () => {
+    // Perfectly possible: an expense from before the loss and an edit after it.
+    const state = computeState([
+      ...base(),
+      expense('e1', {
+        amount_cents: 900,
+        payers: [{ user_id: 1, paid_cents: 900 }],
+        splits: [
+          { user_id: 1, share_cents: 300 },
+          { user_id: 2, share_cents: 300 },
+          { user_id: 3, share_cents: 300 },
+        ],
+      }),
+      merged(2, 3),
+    ])
+    assert.equal(netOf(state, 3), -600, 'both shares land on the same person')
+    assert.equal(netOf(state, 1), 600)
+    assert.equal(state.ledger[0].splits.length, 2)
+  })
+
+  test('settlements move to the new identity', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1'),
+      ev('settlement.created', {
+        settlement_id: 's1',
+        from: 2,
+        to: 1,
+        amount_cents: 500,
+        date: '2026-01-02',
+      }),
+      merged(2, 3),
+    ])
+    assert.equal(netOf(state, 1), 0)
+    assert.equal(netOf(state, 3), 0)
+    assert.equal(state.payments[0].from, 3)
+    assert.equal(state.payments[0].from_name, 'd-again')
+  })
+
+  test('you can still edit comments you wrote as your old self', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1'),
+      ev('comment.created', { comment_id: 'c1', expense_id: 'e1', text: 'hi' }, 2),
+      merged(2, 3),
+    ])
+    const [comment] = state.ledger[0].comments
+    assert.equal(comment.author, 3)
+    assert.equal(comment.author_name, 'd-again')
+  })
+
+  test('a receipt recipe stops naming the old identity', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1', {
+        split: {
+          mode: 'items',
+          participants: [1, 2, 3],
+          items: [{ id: 'i1', price_cents: 1000, claimed_by: [2] }],
+        },
+      }),
+      merged(2, 3),
+    ])
+    const recipe = state.ledger[0].split
+    assert.deepEqual(recipe.participants, [1, 3])
+    assert.deepEqual(recipe.items[0].claimed_by, [3])
+  })
+
+  test('percentage weights are combined, not clobbered', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1', { split: { mode: 'percentage', weights: { 1: 50, 2: 30, 3: 20 } } }),
+      merged(2, 3),
+    ])
+    assert.deepEqual(state.ledger[0].split.weights, { 1: 50, 3: 50 })
+  })
+
+  test('merges chain, so losing your account twice still works', () => {
+    const state = computeState([
+      ...base(),
+      member(4, 'd-third'),
+      expense('e1'),
+      merged(2, 3),
+      merged(3, 4),
+    ])
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 4]
+    )
+    assert.equal(netOf(state, 4), -500)
+  })
+
+  test('a cycle picks the same survivor whichever end is looked at first', () => {
+    // Nonsense data, but every client must still agree. Resolution order
+    // follows the order the merges arrive in, so the two orderings below would
+    // otherwise strand the balance under different members on different
+    // devices — the one failure this whole architecture exists to avoid.
+    const forwards = computeState([...base(), expense('e1'), merged(2, 3), merged(3, 2)])
+    const backwards = computeState([...base(), expense('e1'), merged(3, 2), merged(2, 3)])
+
+    assert.deepEqual(
+      forwards.members.map((m) => m.id),
+      backwards.members.map((m) => m.id),
+      'the same people survive regardless of arrival order'
+    )
+    assert.deepEqual(
+      forwards.balances.map((b) => [b.user_id, b.net_cents]),
+      backwards.balances.map((b) => [b.user_id, b.net_cents])
+    )
+    // Lowest id in the cycle, chosen precisely because it does not depend on
+    // traversal order.
+    assert.deepEqual(
+      forwards.members.map((m) => m.id),
+      [1, 2]
+    )
+  })
+
+  test('a cycle is survived rather than hung on', () => {
+    // Nonsense data, but it must not spin forever.
+    const state = computeState([...base(), expense('e1'), merged(2, 3), merged(3, 2)])
+    assert.equal(
+      state.balances.reduce((t, b) => t + b.net_cents, 0),
+      0
+    )
+  })
+
+  test('malformed and self merges are ignored', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1'),
+      ev('member.merged', null),
+      ev('member.merged', { old_member_id: 2 }),
+      ev('member.merged', { old_member_id: 2, new_member_id: 2 }),
+    ])
+    assert.equal(state.members.length, 3)
+    assert.equal(netOf(state, 2), -500)
+  })
+
+  test('balances still sum to zero after a merge', () => {
+    const state = computeState([
+      ...base(),
+      expense('e1'),
+      expense('e2', {
+        amount_cents: 999,
+        payers: [{ user_id: 3, paid_cents: 999 }],
+        splits: [
+          { user_id: 1, share_cents: 333 },
+          { user_id: 2, share_cents: 333 },
+          { user_id: 3, share_cents: 333 },
+        ],
+      }),
+      merged(2, 3),
+    ])
+    assert.equal(
+      state.balances.reduce((t, b) => t + b.net_cents, 0),
+      0
+    )
+  })
+})

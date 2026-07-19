@@ -394,3 +394,106 @@ describe('what actually crosses the wire', () => {
     assert.ok(text().includes('Dinner'))
   })
 })
+
+describe('recovering an account from the group side', () => {
+  const spent = [
+    {
+      id: 3,
+      type: 'expense.created',
+      author: 1,
+      payload: {
+        expense_id: 'e1',
+        description: 'Dinner',
+        amount_cents: 1000,
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: 2, share_cents: 500 },
+        ],
+        date: '2026-01-01',
+      },
+    },
+  ]
+
+  // Read the balances panel structurally: matching on display names in the
+  // whole page would trip over 'd' being a prefix of 'd-again'.
+  const balances = () =>
+    Object.fromEntries(
+      [...(byText('h3', 'Balances')?.nextElementSibling?.children ?? [])].map(
+        (li) => [li.children[0].textContent, li.children[1].textContent]
+      )
+    )
+
+  const openWithThree = async () => {
+    const api = await fakeApi({ seed: spent })
+    // A third member: the new account the lost one is merged into.
+    api.events.splice(2, 0, {
+      id: 2.5,
+      type: 'member.added',
+      payload: { user_id: 3, display_name: 'd-again' },
+    })
+    await open()
+    return api
+  }
+
+  test('is offered as a plain, unalarming control', async () => {
+    await openWithThree()
+    assert.ok(byText('button', 'someone lost their account?'))
+  })
+
+  test('moves what they owed onto the new account', async () => {
+    const api = await openWithThree()
+    assert.deepEqual(balances(), {
+      v: 'is owed $5.00',
+      d: 'owes $5.00',
+      'd-again': 'settled up',
+    })
+
+    await click(byText('button', 'someone lost their account?'))
+    const form = byText('h4', 'Same person')?.closest('form')
+    const [oldPick, newPick] = form.querySelectorAll('select')
+    await change(oldPick, '2')
+    await change(newPick, '3')
+    await submit(form)
+
+    const merge = api.posted.find((e) => e.type === 'member.merged')
+    assert.ok(merge, 'a merge event was appended')
+    assert.deepEqual(
+      { old: merge.payload.old_member_id, new: merge.payload.new_member_id },
+      { old: 2, new: 3 }
+    )
+
+    // The old account is gone from the group and the debt followed the person.
+    assert.deepEqual(balances(), {
+      v: 'is owed $5.00',
+      'd-again': 'owes $5.00',
+    })
+  })
+
+  test('the merge event is encrypted like everything else', async () => {
+    const api = await openWithThree()
+    await click(byText('button', 'someone lost their account?'))
+    const form = byText('h4', 'Same person')?.closest('form')
+    const [oldPick, newPick] = form.querySelectorAll('select')
+    await change(oldPick, '2')
+    await change(newPick, '3')
+    await submit(form)
+
+    const raw = api.raw.find((e) => e.type === 'member.merged')
+    assert.ok(raw.payload.enc, 'who was merged into whom is not the server’s business')
+    assert.ok(!JSON.stringify(raw).includes('old_member_id'))
+  })
+
+  test('refuses to merge someone into themselves', async () => {
+    const api = await openWithThree()
+    await click(byText('button', 'someone lost their account?'))
+    const form = byText('h4', 'Same person')?.closest('form')
+    const [oldPick, newPick] = form.querySelectorAll('select')
+    await change(oldPick, '2')
+    await change(newPick, '2')
+    await submit(form)
+
+    assert.ok(text().includes('same person'))
+    assert.equal(api.posted.filter((e) => e.type === 'member.merged').length, 0)
+  })
+})
