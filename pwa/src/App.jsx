@@ -305,7 +305,65 @@ function Settings({ ai, onChanged, onClose }) {
         <p className="muted">No key yet — receipt scanning is off.</p>
       )}
       {error && <p className="error">{error}</p>}
+
+      <h2>Account</h2>
+      <PasswordForm />
     </section>
+  )
+}
+
+function PasswordForm() {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [done, setDone] = useState('')
+  const [error, setError] = useState('')
+
+  async function submit(e) {
+    e.preventDefault()
+    setError('')
+    setDone('')
+    if (!next) return setError('Enter a new password')
+    if (next !== confirm) return setError('New passwords do not match')
+    try {
+      await api('password', { current_password: current, new_password: next })
+      setCurrent('')
+      setNext('')
+      setConfirm('')
+      setDone('Password changed — your other devices have been signed out.')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <h3>Change password</h3>
+      <input
+        type="password"
+        placeholder="current password"
+        autoComplete="current-password"
+        value={current}
+        onChange={(e) => setCurrent(e.target.value)}
+      />
+      <input
+        type="password"
+        placeholder="new password"
+        autoComplete="new-password"
+        value={next}
+        onChange={(e) => setNext(e.target.value)}
+      />
+      <input
+        type="password"
+        placeholder="confirm new password"
+        autoComplete="new-password"
+        value={confirm}
+        onChange={(e) => setConfirm(e.target.value)}
+      />
+      <button type="submit">Change password</button>
+      {done && <p className="muted">{done}</p>}
+      {error && <p className="error">{error}</p>}
+    </form>
   )
 }
 
@@ -1161,6 +1219,8 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         }))
       )
       setAmount((result.total_cents / 100).toFixed(2))
+      // A scan implies an itemised split, whatever mode you were in.
+      setMode('items')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -1357,6 +1417,24 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
         </select>
       </label>
 
+      {/* Scanning is how you'd *start* an expense, so it can't be hidden
+          behind picking the items mode first — a successful scan switches
+          the mode itself. */}
+      {ai?.active && (
+        <label className="scan">
+          {scanning
+            ? 'scanning…'
+            : `📷 scan a receipt with ${PROVIDERS[ai.active]?.label ?? ai.active}`}
+          <input
+            type="file"
+            accept="image/*"
+            capture="environment"
+            disabled={scanning}
+            onChange={scan}
+          />
+        </label>
+      )}
+
       {(mode === 'equal' || mode === 'items') && (
         <fieldset className="participants">
           <legend>{mode === 'items' ? 'on the receipt' : 'split between'}</legend>
@@ -1375,20 +1453,6 @@ function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
 
       {mode === 'items' && (
         <>
-          {ai?.active && (
-            <label className="scan">
-              {scanning
-                ? 'scanning…'
-                : `📷 scan receipt with ${PROVIDERS[ai.active]?.label ?? ai.active}`}
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                disabled={scanning}
-                onChange={scan}
-              />
-            </label>
-          )}
           <ReceiptEditor
             items={items}
             setItems={setItems}

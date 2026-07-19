@@ -170,6 +170,64 @@ def test_requires_auth():
     assert anon.get("/api/ai/settings").status_code == 401
 
 
+def test_change_password():
+    u = signed_up("pwuser")
+    # a second device signed in as the same user
+    other = TestClient(app, base_url="https://testserver")
+    other.post("/api/login", json={"username": "pwuser", "password": "pw"})
+    assert other.get("/api/me").status_code == 200
+
+    # wrong current password is rejected
+    assert (
+        u.post(
+            "/api/password", json={"current_password": "nope", "new_password": "new"}
+        ).status_code
+        == 401
+    )
+    # empty new password is rejected
+    assert (
+        u.post(
+            "/api/password", json={"current_password": "pw", "new_password": ""}
+        ).status_code
+        == 400
+    )
+
+    assert (
+        u.post(
+            "/api/password", json={"current_password": "pw", "new_password": "newpw"}
+        ).status_code
+        == 200
+    )
+    # the changing session stays signed in; other sessions are signed out
+    assert u.get("/api/me").status_code == 200
+    assert other.get("/api/me").status_code == 401
+
+    # old password no longer works, new one does
+    fresh = TestClient(app, base_url="https://testserver")
+    assert (
+        fresh.post(
+            "/api/login", json={"username": "pwuser", "password": "pw"}
+        ).status_code
+        == 401
+    )
+    assert (
+        fresh.post(
+            "/api/login", json={"username": "pwuser", "password": "newpw"}
+        ).status_code
+        == 200
+    )
+
+
+def test_change_password_requires_auth():
+    anon = TestClient(app, base_url="https://testserver")
+    assert (
+        anon.post(
+            "/api/password", json={"current_password": "a", "new_password": "b"}
+        ).status_code
+        == 401
+    )
+
+
 def test_ai_provider_settings():
     u = signed_up("aiuser")
 
