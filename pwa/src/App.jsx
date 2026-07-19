@@ -6,7 +6,13 @@ import {
   useRef,
   useState,
 } from 'react'
-import { computeState, simplify, splitByWeights, splitEqually } from './ledger'
+import {
+  computeState,
+  receiptWeights,
+  simplify,
+  splitByWeights,
+  splitEqually,
+} from './ledger'
 
 async function api(path, body) {
   const res = await fetch(`/api/${path}`, {
@@ -554,6 +560,43 @@ function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDele
           ))}
         </ul>
 
+        {expense.split?.mode === 'items' &&
+          Array.isArray(expense.split.items) && (
+            <>
+              <h4>Receipt</h4>
+              <ul className="list">
+                {expense.split.items.map((it) => (
+                  <li key={it.id} className="row static">
+                    <div className="expense">
+                      <span>{it.name || 'item'}</span>
+                      <span className="muted">
+                        {it.claimed_by?.length
+                          ? it.claimed_by
+                              .map((id) => nameById[id] || '?')
+                              .join(', ')
+                          : 'everyone'}
+                      </span>
+                    </div>
+                    <span>{money(it.price_cents)}</span>
+                  </li>
+                ))}
+              </ul>
+              {(() => {
+                const sub = expense.split.items.reduce(
+                  (t, it) => t + (it.price_cents || 0),
+                  0
+                )
+                const adj = expense.amount_cents - sub
+                return (
+                  <p className="muted">
+                    items {money(sub)} · {adj >= 0 ? 'tax/tip' : 'discount'}{' '}
+                    {money(Math.abs(adj))}
+                  </p>
+                )
+              })()}
+            </>
+          )}
+
         <h4>Owes</h4>
         <ul className="list">
           {expense.splits.map((s) => (
@@ -643,6 +686,88 @@ function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDele
 function memberIdFor(members, me) {
   const mine = members.find((m) => m.username === me.username)
   return (mine || members[0])?.id
+}
+
+// Line items with per-person claims. Claim an item and it splits between its
+// claimants; leave it unclaimed and it splits among everyone on the receipt.
+function ReceiptEditor({ items, setItems, participants }) {
+  // Functional updates throughout: two edits batched in one tick (e.g. name and
+  // price together) must not read the same stale list and clobber each other.
+  const update = (idx, patch) =>
+    setItems((prev) =>
+      prev.map((it, i) => (i === idx ? { ...it, ...patch } : it))
+    )
+  const toggleClaim = (idx, uid) =>
+    setItems((prev) =>
+      prev.map((it, i) =>
+        i === idx
+          ? {
+              ...it,
+              claimed_by: it.claimed_by.includes(uid)
+                ? it.claimed_by.filter((x) => x !== uid)
+                : [...it.claimed_by, uid],
+            }
+          : it
+      )
+    )
+
+  return (
+    <fieldset className="participants receipt">
+      <legend>items (unclaimed ones split among everyone)</legend>
+      {items.length === 0 && (
+        <p className="muted">No items yet — add the lines off the receipt.</p>
+      )}
+      {items.map((it, idx) => (
+        <div key={it.id} className="item">
+          <div className="item-head">
+            <input
+              placeholder="item"
+              value={it.name}
+              onChange={(e) => update(idx, { name: e.target.value })}
+            />
+            <input
+              className="pay-amt"
+              inputMode="decimal"
+              placeholder="0.00"
+              value={it.price}
+              onChange={(e) => update(idx, { price: e.target.value })}
+            />
+            <button
+              type="button"
+              className="link danger"
+              onClick={() => setItems((prev) => prev.filter((_, i) => i !== idx))}
+            >
+              remove
+            </button>
+          </div>
+          <div className="claims">
+            {participants.map((m) => (
+              <label key={m.id} className="check">
+                <input
+                  type="checkbox"
+                  checked={it.claimed_by.includes(m.id)}
+                  onChange={() => toggleClaim(idx, m.id)}
+                />
+                {m.username}
+              </label>
+            ))}
+          </div>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="link"
+        onClick={() =>
+          setItems((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), name: '', price: '', claimed_by: [] },
+          ])
+        }
+      >
+        + add item
+      </button>
+    </fieldset>
+  )
 }
 
 // Suggested minimal transfers. One click opens an editable amount (prefilled
@@ -819,11 +944,28 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
         )
       : {}
   )
+  // Receipt line items (prices as strings while typing).
+  const [items, setItems] = useState(() =>
+    initial?.split?.mode === 'items' && Array.isArray(initial.split.items)
+      ? initial.split.items.map((it) => ({
+          id: it.id || crypto.randomUUID(),
+          name: it.name || '',
+          price: ((it.price_cents || 0) / 100).toFixed(2),
+          claimed_by: it.claimed_by || [],
+        }))
+      : []
+  )
   // members left OUT of the split (so members who join later default to "in")
   const [excluded, setExcluded] = useState(() => {
     if (!initial) return []
+    const all = members.map((m) => m.id)
+    // A receipt keeps its own participant set: someone can be on the receipt
+    // yet owe nothing, so it can't be re-derived from the resolved splits.
+    if (initial.split?.mode === 'items' && Array.isArray(initial.split.participants)) {
+      return all.filter((id) => !initial.split.participants.includes(id))
+    }
     const inSplit = initial.splits.map((s) => s.user_id)
-    return members.map((m) => m.id).filter((id) => !inSplit.includes(id))
+    return all.filter((id) => !inSplit.includes(id))
   })
   const [payerIds, setPayerIds] = useState(() =>
     initial ? initial.payers.map((p) => p.user_id) : [memberIdFor(members, me)]
@@ -866,6 +1008,29 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
         share_cents: shares[uid],
       }))
       split = { mode: 'equal' }
+    } else if (mode === 'items') {
+      const participants = members
+        .map((m) => m.id)
+        .filter((id) => !excluded.includes(id))
+      if (!participants.length) return setError('Pick who is on the receipt')
+      const parsed = items
+        .map((it) => ({
+          id: it.id,
+          name: it.name.trim(),
+          price_cents: Math.round(parseFloat(it.price) * 100) || 0,
+          claimed_by: it.claimed_by.filter((id) => participants.includes(id)),
+        }))
+        .filter((it) => it.price_cents > 0)
+      if (!parsed.length) return setError('Add at least one item with a price')
+      const w = receiptWeights(parsed, participants)
+      const positive = {}
+      for (const [id, v] of Object.entries(w)) if (v > 0) positive[id] = v
+      const shares = splitByWeights(cents, positive)
+      splits = Object.keys(shares)
+        .map(Number)
+        .sort((a, b) => a - b)
+        .map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
+      split = { mode: 'items', participants, items: parsed }
     } else {
       const w = {}
       for (const m of members) {
@@ -935,6 +1100,15 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
     }
   }
 
+  // Live receipt maths: the gap between the items and the total is the tax/tip
+  // (or discount) that gets spread proportionally.
+  const amountCents = Math.round(parseFloat(amount) * 100) || 0
+  const itemsTotalCents = items.reduce(
+    (t, it) => t + (Math.round(parseFloat(it.price) * 100) || 0),
+    0
+  )
+  const adjustment = amountCents - itemsTotalCents
+
   return (
     <form onSubmit={submit}>
       <h3>{initial ? 'Edit expense' : 'Add an expense'}</h3>
@@ -993,12 +1167,13 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
           <option value="equal">equally</option>
           <option value="percentage">by percentage</option>
           <option value="shares">by shares</option>
+          <option value="items">by receipt items</option>
         </select>
       </label>
 
-      {mode === 'equal' ? (
+      {(mode === 'equal' || mode === 'items') && (
         <fieldset className="participants">
-          <legend>split between</legend>
+          <legend>{mode === 'items' ? 'on the receipt' : 'split between'}</legend>
           {members.map((m) => (
             <label key={m.id} className="check">
               <input
@@ -1010,7 +1185,26 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
             </label>
           ))}
         </fieldset>
-      ) : (
+      )}
+
+      {mode === 'items' && (
+        <>
+          <ReceiptEditor
+            items={items}
+            setItems={setItems}
+            participants={members.filter((m) => !excluded.includes(m.id))}
+          />
+          {itemsTotalCents > 0 && (
+            <p className="muted">
+              items {money(itemsTotalCents)} ·{' '}
+              {adjustment >= 0 ? 'tax/tip' : 'discount'}{' '}
+              {money(Math.abs(adjustment))} · total {money(amountCents)}
+            </p>
+          )}
+        </>
+      )}
+
+      {(mode === 'percentage' || mode === 'shares') && (
         <fieldset className="participants">
           <legend>
             {mode === 'percentage' ? 'percentages (total 100)' : 'shares'}
