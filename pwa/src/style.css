@@ -258,6 +258,13 @@ input.pay-amt {
   gap: 0.5rem;
 }
 
+.receipt-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
 .receipt-thumb {
   display: block;
   width: 72px;
