@@ -13,10 +13,11 @@ import {
   splitByWeights,
   splitEqually,
 } from './ledger'
+import { PROVIDERS, extractReceipt } from './ai'
 
-async function api(path, body) {
+async function api(path, body, method) {
   const res = await fetch(`/api/${path}`, {
-    method: body ? 'POST' : 'GET',
+    method: method || (body ? 'POST' : 'GET'),
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   })
@@ -131,6 +132,20 @@ function Auth({ onAuth }) {
 
 function Home({ user, onLogout }) {
   const [groupId, setGroupId] = useState(null)
+  const [showSettings, setShowSettings] = useState(false)
+  // null until loaded; { active, providers } after. No key => no provider.
+  const [ai, setAi] = useState(null)
+
+  const loadAi = useCallback(
+    () =>
+      api('ai/settings')
+        .then(setAi)
+        .catch(() => {}),
+    []
+  )
+  useEffect(() => {
+    loadAi()
+  }, [loadAi])
 
   async function logout() {
     await api('logout', {})
@@ -140,21 +155,157 @@ function Home({ user, onLogout }) {
   return (
     <main className="app">
       <header>
-        <strong className="brand" onClick={() => setGroupId(null)}>
+        <strong
+          className="brand"
+          onClick={() => {
+            setGroupId(null)
+            setShowSettings(false)
+          }}
+        >
           Split
         </strong>
         <span className="spacer" />
         <span className="muted">{user.username}</span>
+        <button className="link" onClick={() => setShowSettings(true)}>
+          settings
+        </button>
         <button className="link" onClick={logout}>
           Log out
         </button>
       </header>
-      {groupId ? (
-        <GroupView groupId={groupId} me={user} onBack={() => setGroupId(null)} />
+      {showSettings ? (
+        <Settings
+          ai={ai}
+          onChanged={loadAi}
+          onClose={() => setShowSettings(false)}
+        />
+      ) : groupId ? (
+        <GroupView
+          groupId={groupId}
+          me={user}
+          ai={ai}
+          onBack={() => setGroupId(null)}
+        />
       ) : (
         <GroupList onOpen={setGroupId} />
       )}
     </main>
+  )
+}
+
+const maskKey = (key) => `…${String(key).slice(-4)}`
+
+// Provider settings. There is no default provider — with no keys the scanning
+// feature simply doesn't exist. Adding a key (or switching) makes it active.
+function Settings({ ai, onChanged, onClose }) {
+  const [drafts, setDrafts] = useState({})
+  const [error, setError] = useState('')
+
+  async function run(fn) {
+    setError('')
+    try {
+      await fn()
+      await onChanged()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+  const saveKey = (id) =>
+    run(async () => {
+      await api(`ai/providers/${id}`, { api_key: drafts[id] }, 'PUT')
+      setDrafts((d) => ({ ...d, [id]: '' }))
+    })
+  const chooseModel = (id, model) =>
+    run(() => api(`ai/providers/${id}`, { model }, 'PUT'))
+  const activate = (id) => run(() => api('ai/active', { provider: id }))
+  const remove = (id) => run(() => api(`ai/providers/${id}`, undefined, 'DELETE'))
+
+  return (
+    <section>
+      <button className="link" onClick={onClose}>
+        ← back
+      </button>
+      <h2>Receipt scanning</h2>
+      <p className="muted">
+        Add an API key to turn on receipt scanning. The key is stored on your
+        account and used straight from this browser, so receipt photos go to the
+        provider you pick — not through our server.
+      </p>
+
+      {Object.entries(PROVIDERS).map(([id, provider]) => {
+        const saved = ai?.providers?.[id]
+        const isActive = ai?.active === id
+        return (
+          <fieldset key={id} className="participants receipt">
+            <legend>
+              {provider.label}
+              {isActive ? ' · in use' : ''}
+            </legend>
+            {saved ? (
+              <>
+                <p className="muted">key saved ({maskKey(saved.api_key)})</p>
+                <label className="field">
+                  model
+                  <select
+                    value={saved.model}
+                    onChange={(e) => chooseModel(id, e.target.value)}
+                  >
+                    {provider.models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label} — {m.price}
+                      </option>
+                    ))}
+                    {!provider.models.some((m) => m.id === saved.model) && (
+                      <option value={saved.model}>{saved.model}</option>
+                    )}
+                  </select>
+                </label>
+                <div className="row-actions">
+                  {!isActive && (
+                    <button className="link" onClick={() => activate(id)}>
+                      use this one
+                    </button>
+                  )}
+                  <button className="link danger" onClick={() => remove(id)}>
+                    remove key
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="settle-edit">
+                <input
+                  type="password"
+                  placeholder={`${provider.label} API key`}
+                  value={drafts[id] ?? ''}
+                  onChange={(e) =>
+                    setDrafts((d) => ({ ...d, [id]: e.target.value }))
+                  }
+                />
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => saveKey(id)}
+                  disabled={!(drafts[id] || '').trim()}
+                >
+                  save
+                </button>
+              </div>
+            )}
+            {id === 'openai' && (
+              <p className="muted">
+                Note: OpenAI doesn&apos;t officially support calls straight from
+                a browser, so this can be blocked. Anthropic supports it.
+              </p>
+            )}
+          </fieldset>
+        )
+      })}
+
+      {ai && !ai.active && (
+        <p className="muted">No key yet — receipt scanning is off.</p>
+      )}
+      {error && <p className="error">{error}</p>}
+    </section>
   )
 }
 
@@ -238,7 +389,7 @@ function GroupList({ onOpen }) {
   )
 }
 
-function GroupView({ groupId, me, onBack }) {
+function GroupView({ groupId, me, ai, onBack }) {
   const [meta, setMeta] = useState(null)
   const [events, setEvents] = useState([])
   const [version, setVersion] = useState(0)
@@ -424,6 +575,7 @@ function GroupView({ groupId, me, onBack }) {
           key={editing?.expense_id || 'new'}
           members={state.members}
           me={me}
+          ai={ai}
           initial={editing}
           onSubmit={submitExpense}
           onCancel={() => setEditing(null)}
@@ -926,7 +1078,8 @@ function Payments({ payments, onEdit, onDelete }) {
   )
 }
 
-function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
+function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
+  const [scanning, setScanning] = useState(false)
   const today = new Date().toISOString().slice(0, 10)
   const [description, setDescription] = useState(initial?.description ?? '')
   const [amount, setAmount] = useState(
@@ -981,6 +1134,39 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
 
   const toggle = (list, setList, id) =>
     setList(list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
+
+  // Scanned output is a *draft*: it fills the editable rows so the user can
+  // fix OCR mistakes before anything is saved.
+  async function scan(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    const config = ai?.providers?.[ai.active]
+    if (!config) return
+    setScanning(true)
+    setError('')
+    try {
+      const result = await extractReceipt({
+        provider: ai.active,
+        apiKey: config.api_key,
+        model: config.model,
+        file,
+      })
+      setItems(
+        result.items.map((it) => ({
+          id: crypto.randomUUID(),
+          name: it.name,
+          price: (it.price_cents / 100).toFixed(2),
+          claimed_by: [],
+        }))
+      )
+      setAmount((result.total_cents / 100).toFixed(2))
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setScanning(false)
+    }
+  }
 
   async function submit(e) {
     e.preventDefault()
@@ -1189,6 +1375,20 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
 
       {mode === 'items' && (
         <>
+          {ai?.active && (
+            <label className="scan">
+              {scanning
+                ? 'scanning…'
+                : `📷 scan receipt with ${PROVIDERS[ai.active]?.label ?? ai.active}`}
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                disabled={scanning}
+                onChange={scan}
+              />
+            </label>
+          )}
           <ReceiptEditor
             items={items}
             setItems={setItems}

@@ -167,3 +167,76 @@ def test_requires_auth():
     anon = TestClient(app, base_url="https://testserver")
     assert anon.get("/api/groups").status_code == 401
     assert anon.post("/api/groups", json={"name": "x"}).status_code == 401
+    assert anon.get("/api/ai/settings").status_code == 401
+
+
+def test_ai_provider_settings():
+    u = signed_up("aiuser")
+
+    # No keys -> no provider at all, so the feature is unavailable
+    s = u.get("/api/ai/settings").json()
+    assert s == {"active": None, "providers": {}}
+
+    # Adding a key makes that provider active, defaulting to the cheapest model
+    assert (
+        u.put("/api/ai/providers/anthropic", json={"api_key": "sk-ant-1"}).status_code
+        == 200
+    )
+    s = u.get("/api/ai/settings").json()
+    assert s["active"] == "anthropic"
+    assert s["providers"]["anthropic"] == {
+        "api_key": "sk-ant-1",
+        "model": "claude-haiku-4-5",
+    }
+
+    # Adding a second key makes the newly added provider active
+    u.put("/api/ai/providers/openai", json={"api_key": "sk-oai-1"})
+    s = u.get("/api/ai/settings").json()
+    assert s["active"] == "openai"
+    assert s["providers"]["openai"]["model"] == "gpt-5.4-nano"
+    assert set(s["providers"]) == {"anthropic", "openai"}
+
+    # An explicit switch persists
+    assert u.post("/api/ai/active", json={"provider": "anthropic"}).status_code == 200
+    assert u.get("/api/ai/settings").json()["active"] == "anthropic"
+
+    # Model choice persists per provider and doesn't change the active provider
+    u.put("/api/ai/providers/openai", json={"model": "gpt-5.4-mini"})
+    s = u.get("/api/ai/settings").json()
+    assert s["providers"]["openai"]["model"] == "gpt-5.4-mini"
+    assert s["active"] == "anthropic"
+
+    # Replacing a key keeps the chosen model but re-activates that provider
+    u.put("/api/ai/providers/openai", json={"api_key": "sk-oai-2"})
+    s = u.get("/api/ai/settings").json()
+    assert s["providers"]["openai"] == {"api_key": "sk-oai-2", "model": "gpt-5.4-mini"}
+    assert s["active"] == "openai"
+
+    # Deleting the active provider hands active to the remaining key
+    assert u.delete("/api/ai/providers/openai").status_code == 200
+    s = u.get("/api/ai/settings").json()
+    assert s["active"] == "anthropic"
+    assert set(s["providers"]) == {"anthropic"}
+
+    # Deleting the last key leaves no provider
+    u.delete("/api/ai/providers/anthropic")
+    assert u.get("/api/ai/settings").json() == {"active": None, "providers": {}}
+
+
+def test_ai_provider_validation():
+    u = signed_up("aiuser2")
+    assert u.put("/api/ai/providers/bogus", json={"api_key": "x"}).status_code == 404
+    assert u.post("/api/ai/active", json={"provider": "bogus"}).status_code == 404
+    # selecting or setting a model for a provider with no key
+    assert u.post("/api/ai/active", json={"provider": "openai"}).status_code == 404
+    assert (
+        u.put("/api/ai/providers/openai", json={"model": "gpt-5.4-mini"}).status_code
+        == 404
+    )
+    assert u.put("/api/ai/providers/openai", json={}).status_code == 400
+    assert u.put("/api/ai/providers/openai", json={"api_key": "  "}).status_code == 400
+
+    # keys are scoped per user
+    other = signed_up("aiuser3")
+    u.put("/api/ai/providers/anthropic", json={"api_key": "mine"})
+    assert other.get("/api/ai/settings").json()["providers"] == {}
