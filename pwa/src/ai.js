@@ -28,11 +28,18 @@ export const PROVIDERS = {
 }
 
 const PROMPT = [
-  'Extract the line items and the final total from this receipt.',
+  'Extract the line items and the totals from this receipt.',
   'Amounts are integer cents: $4.50 is 450.',
   'items: one entry per purchased line item. Do NOT include subtotal, tax,',
-  'tip, or total lines as items.',
+  'tip, service charge, or total lines as items.',
+  'subtotal_cents: the pre-tax, pre-tip subtotal printed on the receipt.',
+  'Before you answer, add up your item prices and check that they equal that',
+  'subtotal exactly. If they do not, re-read the receipt and fix the items —',
+  'a missed line or a misread digit is the usual cause.',
+  'tax_cents and tip_cents: the tax and the tip if the receipt shows them,',
+  'otherwise 0.',
   'total_cents: the final amount actually charged, after tax, tip and discounts.',
+  'Use 0 for any total the receipt does not show.',
 ].join(' ')
 
 const SCHEMA = {
@@ -50,9 +57,14 @@ const SCHEMA = {
         additionalProperties: false,
       },
     },
+    subtotal_cents: { type: 'integer' },
+    tax_cents: { type: 'integer' },
+    tip_cents: { type: 'integer' },
     total_cents: { type: 'integer' },
   },
-  required: ['items', 'total_cents'],
+  // Every field is required because OpenAI's strict mode demands it; the
+  // prompt tells the model to answer 0 rather than omit.
+  required: ['items', 'subtotal_cents', 'tax_cents', 'tip_cents', 'total_cents'],
   additionalProperties: false,
 }
 
@@ -151,7 +163,9 @@ async function callOpenAI({ apiKey, model, dataUrl }) {
 }
 
 // Trust nothing: the model can return the right shape with junk in it.
-function normalize(raw) {
+// Asking the model to self-check its arithmetic catches some misreads, but a
+// model that miscounts can also mis-verify, so we redo the check here.
+export function normalize(raw) {
   const items = Array.isArray(raw?.items) ? raw.items : []
   const clean = items
     .map((it) => ({
@@ -159,12 +173,28 @@ function normalize(raw) {
       price_cents: Math.round(Number(it?.price_cents)),
     }))
     .filter((it) => Number.isFinite(it.price_cents) && it.price_cents > 0)
-  const total = Math.round(Number(raw?.total_cents))
   const itemsTotal = clean.reduce((t, it) => t + it.price_cents, 0)
+
+  const positive = (v) => {
+    const n = Math.round(Number(v))
+    return Number.isFinite(n) && n > 0 ? n : 0
+  }
+  const subtotal = positive(raw?.subtotal_cents)
+  const tax = positive(raw?.tax_cents)
+  const tip = positive(raw?.tip_cents)
+  // Fall back through what we do have if the model gave no usable total.
+  const total = positive(raw?.total_cents) || subtotal + tax + tip || itemsTotal
+
   return {
     items: clean,
-    // Fall back to the items subtotal if the model didn't give a usable total.
-    total_cents: Number.isFinite(total) && total > 0 ? total : itemsTotal,
+    items_total_cents: itemsTotal,
+    subtotal_cents: subtotal,
+    tax_cents: tax,
+    tip_cents: tip,
+    total_cents: total,
+    // No subtotal on the receipt means nothing to check against — treat that
+    // as "no discrepancy found" rather than blocking on an unanswerable check.
+    matches: !subtotal || subtotal === itemsTotal,
   }
 }
 
