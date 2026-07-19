@@ -9,6 +9,7 @@
 // The server never sees a password or any private key. See plan/11.
 
 import { api } from './api'
+import { adoptGroupsForNewDevice, forgetGroupKeys } from './groupkeys'
 import {
   forgetDeviceKey,
   generateAccountKey,
@@ -50,6 +51,7 @@ export async function signup({ login_handle, display_name, password }) {
     login_handle,
     display_name,
     account_pubkey: account.pubkey,
+    account_box_pubkey: account.box_pubkey,
     device_pubkey: device.pubkey,
     box_pubkey: device.box_pubkey,
     label: deviceLabel(),
@@ -100,6 +102,9 @@ export async function enrol({ login_handle, password }) {
   })
   await saveDeviceKey(device)
   await authenticate(device)
+  // The account copy of each group key is the only one this browser can open,
+  // so re-seal them to the new device key before dropping the account key.
+  await adoptGroupsForNewDevice(account)
   return api('me')
 }
 
@@ -117,6 +122,7 @@ export async function changePassword({ login_handle, current, next }) {
 
 export async function logout() {
   await api('logout', {})
+  forgetGroupKeys()
   // The device key stays: this browser is still an enrolled device, so signing
   // back in needs no password. Revoking is the deliberate, separate act.
 }

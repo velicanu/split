@@ -6,6 +6,15 @@ import { afterEach, describe, test } from 'node:test'
 
 import { GroupView } from '../src/App.jsx'
 import {
+  decryptPayload,
+  encryptPayload,
+  generateDeviceKey,
+  generateGroupKey,
+  saveDeviceKey,
+  sealTo,
+} from '../src/crypto.js'
+import { forgetGroupKeys } from '../src/groupkeys.js'
+import {
   $,
   $$,
   byText,
@@ -37,14 +46,32 @@ const MODEL_REPLY = {
 
 // Enough of the server to answer what GroupView asks for, and to remember
 // what it was told.
-function fakeApi({ seed = [] } = {}) {
+// Everything a client writes is encrypted, so the fake has to hold the group
+// key too — and the seeded ledger has to be sealed exactly as a real client
+// would seal it. That means these tests exercise the real crypto boundary
+// rather than stepping around it.
+async function fakeApi({ seed = [] } = {}) {
+  forgetGroupKeys()
+  const device = await generateDeviceKey()
+  await saveDeviceKey(device)
+  const key = await generateGroupKey()
+  const sealedKey = await sealTo(device.box_pubkey, key)
+
+  const encSeed = []
+  for (const e of seed) {
+    encSeed.push({ ...e, payload: { enc: await encryptPayload(key, e.payload) } })
+  }
+
   const state = {
+    key,
     events: [
       { id: 1, type: 'member.added', payload: { user_id: 1, display_name: 'v' } },
       { id: 2, type: 'member.added', payload: { user_id: 2, display_name: 'd' } },
-      ...seed,
+      ...encSeed,
     ],
     posted: [],
+    // Exactly what went over the wire, before any decryption.
+    raw: [],
     uploads: 0,
   }
   const json = (body) => ({ ok: true, json: async () => body })
@@ -60,10 +87,22 @@ function fakeApi({ seed = [] } = {}) {
       return json({ version, events: fresh })
     }
     if (path.includes('/events')) {
-      state.posted.push(body)
+      state.raw.push(body)
+      // Record the decrypted payload so assertions can read it, but store the
+      // ciphertext, so the round trip through the fold is the real one.
+      const plain = await decryptPayload(state.key, body.payload.enc)
+      state.posted.push({ ...body, payload: plain })
       const id = (state.events.at(-1)?.id ?? 0) + 1
       state.events.push({ id, type: body.type, payload: body.payload, author: 1 })
       return json({ id })
+    }
+    if (path.endsWith('/keys')) {
+      if (body) return json({ ok: true })
+      return json({
+        keys: [
+          { recipient_kind: 'device', recipient_id: 'd1', ciphertext: sealedKey },
+        ],
+      })
     }
     if (path.endsWith('/receipts')) {
       state.uploads += 1
@@ -101,7 +140,7 @@ async function fillAndSubmit({ description = 'Lunch', amount = '20.00' } = {}) {
 
 describe('creating an expense with a receipt', () => {
   test('files the receipt id with the expense', async () => {
-    const api = fakeApi()
+    const api = await fakeApi()
     await open()
     await upload(attachControl(), { name: 'receipt.jpg' })
     await fillAndSubmit()
@@ -113,7 +152,7 @@ describe('creating an expense with a receipt', () => {
   test('clears the form once the expense is filed', async () => {
     // The bug: creating doesn't change the form's key, so without an explicit
     // reset the draft — receipt thumbnail and all — sat there afterwards.
-    const api = fakeApi()
+    const api = await fakeApi()
     await open()
     await upload(attachControl(), { name: 'receipt.jpg' })
     assert.equal(thumbs().length, 1, 'thumbnail should show while drafting')
@@ -127,7 +166,7 @@ describe('creating an expense with a receipt', () => {
   })
 
   test('a second expense does not inherit the first receipt', async () => {
-    const api = fakeApi()
+    const api = await fakeApi()
     await open()
     await upload(attachControl(), { name: 'receipt.jpg' })
     await fillAndSubmit({ description: 'First' })
@@ -139,9 +178,8 @@ describe('creating an expense with a receipt', () => {
   })
 })
 
-describe('the receipt on an existing expense', () => {
-  // An expense already in the ledger, with a receipt attached.
-  const withReceipt = [
+// An expense already in the ledger, with a receipt attached.
+const withReceiptSeed = [
     {
       id: 3,
       type: 'expense.created',
@@ -159,10 +197,13 @@ describe('the receipt on an existing expense', () => {
         receipts: ['stored-1'],
       },
     },
-  ]
+]
+
+describe('the receipt on an existing expense', () => {
+  const withReceipt = withReceiptSeed
 
   const openDetail = async (ai = AI) => {
-    fakeApi({ seed: withReceipt })
+    await fakeApi({ seed: withReceipt })
     await open(ai)
     await click($('.expense.clickable'))
   }
@@ -183,7 +224,7 @@ describe('the receipt on an existing expense', () => {
   test('survives a delete and a restore', async () => {
     // A revision replaces the expense wholesale, so a delete that rebuilds the
     // payload by hand silently destroys whatever it forgets to copy.
-    const api = fakeApi({ seed: withReceipt })
+    const api = await fakeApi({ seed: withReceipt })
     await open()
 
     await click(byText('button', 'delete'))
@@ -200,7 +241,7 @@ describe('the receipt on an existing expense', () => {
   test('keeps its split recipe through a delete', async () => {
     // Same trap: the recipe is what makes an itemised expense re-editable.
     const recipe = { mode: 'items', participants: [1, 2], items: [], tax_cents: 250 }
-    const api = fakeApi({
+    const api = await fakeApi({
       seed: [
         {
           ...withReceipt[0],
@@ -232,11 +273,84 @@ describe('the add form', () => {
   test('offers no per-receipt scan button', async () => {
     // Re-reading a receipt needs an expense to attach the result to, so that
     // button lives on the detail view instead.
-    fakeApi()
+    await fakeApi()
     await open()
     await upload(attachControl(), { name: 'receipt.jpg' })
     assert.equal(thumbs().length, 1)
     assert.equal(byText('button', 'scan'), undefined)
     assert.ok(byText('button', 'remove'), 'but it can still be taken off')
+  })
+})
+
+describe('what actually crosses the wire', () => {
+  test('an expense leaves this device encrypted', async () => {
+    const api = await fakeApi()
+    await open()
+    await change(descriptionField(), 'Anniversary dinner')
+    await change(amountField(), '99.99')
+    await submit(addForm())
+
+    const sent = JSON.stringify(api.raw)
+    assert.ok(sent.includes('"enc"'), 'the payload must be sealed')
+    assert.ok(!sent.includes('Anniversary'), 'no description in the clear')
+    assert.ok(!sent.includes('9999'), 'no amount in the clear')
+    // The type stays readable — the server routes on it and it leaks little.
+    assert.equal(api.raw[0].type, 'expense.created')
+  })
+
+  test('comments and settlements are sealed too, not just expenses', async () => {
+    const api = await fakeApi({ seed: withReceiptSeed })
+    await open()
+    await click($('.expense.clickable'))
+    await change($('.modal input'), 'we should do this again')
+    await submit($('.modal form'))
+
+    const comment = api.raw.find((e) => e.type === 'comment.created')
+    assert.ok(comment, 'the comment was posted')
+    assert.ok(comment.payload.enc)
+    assert.ok(!JSON.stringify(comment).includes('do this again'))
+  })
+
+  test('a device with no key sees a locked group rather than an empty one', async () => {
+    const api = await fakeApi({ seed: withReceiptSeed })
+    // Same ledger, but this browser holds no key that opens it.
+    const original = globalThis.fetch
+    globalThis.fetch = async (url, options) =>
+      String(url).endsWith('/keys') && !options?.body
+        ? { ok: true, json: async () => ({ keys: [] }) }
+        : original(url, options)
+
+    await open()
+    assert.ok(text().includes('no key for this group'))
+    // And emphatically not a group that merely looks empty.
+    assert.ok(!text().includes('Add an expense'))
+    assert.equal(api.posted.length, 0)
+  })
+
+  test('an entry that will not decrypt is skipped, not fatal', async () => {
+    await fakeApi({ seed: withReceiptSeed })
+    const original = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+      const res = await original(url, options)
+      if (String(url).includes('/events') && !options?.body) {
+        const body = await res.json()
+        return {
+          ok: true,
+          json: async () => ({
+            ...body,
+            events: [
+              ...body.events,
+              { id: 99, type: 'expense.created', payload: { enc: 'AAAA.BBBB' } },
+            ],
+          }),
+        }
+      }
+      return res
+    }
+
+    await open()
+    assert.ok(text().includes('could not be decrypted'))
+    // The readable expense still folded.
+    assert.ok(text().includes('Dinner'))
   })
 })

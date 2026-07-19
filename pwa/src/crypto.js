@@ -149,6 +149,70 @@ export async function wrapAccountKey(accountKey, password) {
   }
 }
 
+// --- group keys --------------------------------------------------------
+
+export async function generateGroupKey() {
+  await ready
+  return b64(sodium.randombytes_buf(sodium.crypto_secretbox_KEYBYTES))
+}
+
+/** Seal the group key to a recipient's X25519 public key. Anonymous sealed
+ *  box: only the matching secret key opens it, and the server holds neither. */
+export async function sealTo(boxPubkeyB64, groupKeyB64) {
+  await ready
+  return b64(sodium.crypto_box_seal(unb64(groupKeyB64), unb64(boxPubkeyB64)))
+}
+
+export async function openSealed(boxPubkeyB64, boxPrivkeyB64, sealedB64) {
+  await ready
+  // libsodium throws on failure rather than returning null, so this has to
+  // catch rather than test the result.
+  try {
+    return b64(
+      sodium.crypto_box_seal_open(
+        unb64(sealedB64),
+        unb64(boxPubkeyB64),
+        unb64(boxPrivkeyB64)
+      )
+    )
+  } catch {
+    throw new Error('Could not open the group key')
+  }
+}
+
+// --- payloads ----------------------------------------------------------
+
+/** Encrypt an event payload under the group key. The nonce is random per
+ *  message and travels with the ciphertext. */
+export async function encryptPayload(groupKeyB64, payload) {
+  await ready
+  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES)
+  const sealed = sodium.crypto_secretbox_easy(
+    sodium.from_string(JSON.stringify(payload)),
+    nonce,
+    unb64(groupKeyB64)
+  )
+  return `${b64(nonce)}.${b64(sealed)}`
+}
+
+export async function decryptPayload(groupKeyB64, blob) {
+  await ready
+  const [nonce, body] = String(blob).split('.')
+  if (!nonce || !body) throw new Error('Malformed payload')
+  let plain
+  try {
+    plain = sodium.crypto_secretbox_open_easy(
+      unb64(body),
+      unb64(nonce),
+      unb64(groupKeyB64)
+    )
+  } catch {
+    // Wrong key, or the ciphertext was altered — Poly1305 refuses either way.
+    throw new Error('Could not decrypt')
+  }
+  return JSON.parse(sodium.to_string(plain))
+}
+
 export async function unwrapAccountKey(wrap, password) {
   await ready
   const params = JSON.parse(wrap.params)

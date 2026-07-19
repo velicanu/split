@@ -16,6 +16,9 @@ import {
 import { PROVIDERS, extractReceipt, prepareImage } from './ai'
 import { api } from './api'
 import { changePassword, enrol, logout as signOut, resume, signup } from './auth'
+import { decryptPayload, encryptPayload } from './crypto'
+import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
+import { buildInviteLink, parseInvite } from './invite'
 
 
 const money = (cents) =>
@@ -166,6 +169,9 @@ function Auth({ onAuth }) {
 
 function Home({ user, onLogout }) {
   const [groupId, setGroupId] = useState(null)
+  // An invite link opened while signed out: the fragment survives sign-in, so
+  // pick it up once there's an account to join with.
+  const [pendingInvite] = useState(() => parseInvite(window.location.hash))
   const [showSettings, setShowSettings] = useState(false)
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
@@ -180,6 +186,26 @@ function Home({ user, onLogout }) {
   useEffect(() => {
     loadAi()
   }, [loadAi])
+
+  useEffect(() => {
+    if (!pendingInvite) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const g = await api('groups/join', { code: pendingInvite.code })
+        await publishGroupKey(g.id, pendingInvite.gk)
+        if (!cancelled) setGroupId(g.id)
+      } catch {
+        // Already a member, or a stale link — the groups list still works.
+      } finally {
+        // Clear the key out of the address bar either way.
+        window.history.replaceState(null, '', window.location.pathname)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [pendingInvite])
 
   async function logout() {
     // Ends the session but keeps this device's key: it's still enrolled, so
@@ -476,6 +502,48 @@ function Devices() {
   )
 }
 
+// The link carries the group key in its fragment, so it is a secret in a way
+// the old invite code was not.
+function InviteLink({ groupId, code }) {
+  const [link, setLink] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  async function reveal() {
+    const key = await groupKey(groupId)
+    if (!key) return
+    setLink(buildInviteLink(window.location.origin, code, key))
+  }
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  if (!link) {
+    return (
+      <button className="link" onClick={reveal}>
+        show invite link
+      </button>
+    )
+  }
+  return (
+    <div>
+      <p className="muted">
+        Anyone with this link can read the group — it contains the key. Send it
+        somewhere private.
+      </p>
+      <input className="invite" readOnly value={link} onFocus={(e) => e.target.select()} />
+      <button className="link" onClick={copy}>
+        {copied ? 'copied' : 'copy'}
+      </button>
+    </div>
+  )
+}
+
 function GroupList({ onOpen }) {
   const [groups, setGroups] = useState(null)
   const [name, setName] = useState('')
@@ -492,6 +560,9 @@ function GroupList({ onOpen }) {
     setError('')
     try {
       const g = await api('groups', { name })
+      // Mint the key before anything can be written, so there is never a
+      // window where an event would have nothing to encrypt under.
+      await createGroupKey(g.id)
       setName('')
       onOpen(g.id)
     } catch (err) {
@@ -502,8 +573,15 @@ function GroupList({ onOpen }) {
   async function join(e) {
     e.preventDefault()
     setError('')
+    const invite = parseInvite(code.trim())
+    if (!invite) {
+      return setError('Paste the whole invite link — it carries the group key')
+    }
     try {
-      const g = await api('groups/join', { code: code.trim() })
+      const g = await api('groups/join', { code: invite.code })
+      // Seal the key from the link to this account and device; the server
+      // never saw it and could not have given it to us.
+      await publishGroupKey(g.id, invite.gk)
       setCode('')
       onOpen(g.id)
     } catch (err) {
@@ -544,7 +622,7 @@ function GroupList({ onOpen }) {
         <form onSubmit={join}>
           <h3>Join a group</h3>
           <input
-            placeholder="invite code"
+            placeholder="paste invite link"
             value={code}
             onChange={(e) => setCode(e.target.value)}
           />
@@ -567,17 +645,42 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // A receipt to scan as soon as the edit form opens, set by the detail view.
   const [scanReceipt, setScanReceipt] = useState(null)
   const [error, setError] = useState('')
+  // No readable copy of this group's key on this device.
+  const [locked, setLocked] = useState(false)
+  const [unreadable, setUnreadable] = useState(0)
   const versionRef = useRef(0)
 
-  // Pull only what's newer than what we already hold, then append it.
+  // Pull only what's newer than what we already hold, decrypt it, then append.
   const pull = useCallback(async () => {
     try {
       const res = await api(`groups/${groupId}/events?since=${versionRef.current}`)
-      if (res.events.length) {
-        versionRef.current = res.version
-        setVersion(res.version)
-        setEvents((prev) => [...prev, ...res.events])
+      if (!res.events.length) return
+      const key = await groupKey(groupId)
+      if (!key) {
+        setLocked(true)
+        return
       }
+      setLocked(false)
+      const opened = []
+      let unreadable = 0
+      for (const e of res.events) {
+        // member.added is written by the server, which has no key, so it is
+        // the one event that is never encrypted.
+        if (!e.payload?.enc) {
+          opened.push(e)
+          continue
+        }
+        try {
+          opened.push({ ...e, payload: await decryptPayload(key, e.payload.enc) })
+        } catch {
+          // Skip rather than throw: one bad row must not blank the whole group.
+          unreadable += 1
+        }
+      }
+      setUnreadable((n) => n + unreadable)
+      versionRef.current = res.version
+      setVersion(res.version)
+      setEvents((prev) => [...prev, ...opened])
     } catch (err) {
       setError(err.message)
     }
@@ -606,14 +709,25 @@ export function GroupView({ groupId, me, ai, onBack }) {
     ? state.ledger.find((x) => x.expense_id === viewingId) || null
     : null
 
+  // The only way an event reaches the server: everything is sealed with the
+  // group key first, so no caller can forget to encrypt.
+  const appendEvent = useCallback(
+    async (type, payload) => {
+      const key = await groupKey(groupId)
+      if (!key) throw new Error('No key for this group on this device')
+      await api(`groups/${groupId}/events`, {
+        event_id: crypto.randomUUID(),
+        type,
+        payload: { enc: await encryptPayload(key, payload) },
+      })
+    },
+    [groupId]
+  )
+
   // Append a create or update event; an edit reuses the expense's stable id
   // so the fold treats it as the latest revision of the same expense.
   async function submitExpense(payload, isEdit) {
-    await api(`groups/${groupId}/events`, {
-      event_id: crypto.randomUUID(),
-      type: isEdit ? 'expense.updated' : 'expense.created',
-      payload,
-    })
+    await appendEvent(isEdit ? 'expense.updated' : 'expense.created', payload)
     setEditing(null)
     setScanReceipt(null)
     // Leaving an edit already remounts the form (the key changes back), but
@@ -626,24 +740,20 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // Soft delete / restore is just another revision with the flag flipped.
   async function setDeleted(x, deleted) {
     try {
-      await api(`groups/${groupId}/events`, {
-        event_id: crypto.randomUUID(),
-        type: 'expense.updated',
-        // Carry every field forward: a revision replaces the expense wholesale,
-        // so anything left out here is destroyed by a delete or a restore.
-        payload: {
-          expense_id: x.expense_id,
-          description: x.description,
-          amount_cents: x.amount_cents,
-          payers: x.payers,
-          splits: x.splits,
-          split: x.split,
-          date: x.date,
-          category: x.category,
-          receipts: x.receipts,
-          deleted,
-          updated_at: Date.now(),
-        },
+      // Carry every field forward: a revision replaces the expense wholesale,
+      // so anything left out here is destroyed by a delete or a restore.
+      await appendEvent('expense.updated', {
+        expense_id: x.expense_id,
+        description: x.description,
+        amount_cents: x.amount_cents,
+        payers: x.payers,
+        splits: x.splits,
+        split: x.split,
+        date: x.date,
+        category: x.category,
+        receipts: x.receipts,
+        deleted,
+        updated_at: Date.now(),
       })
       await pull()
     } catch (err) {
@@ -655,10 +765,9 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // recording/editing/deleting a payment is what actually moves balances.
   async function appendSettlement(payload, isEdit) {
     try {
-      await api(`groups/${groupId}/events`, {
-        event_id: crypto.randomUUID(),
-        type: isEdit ? 'settlement.updated' : 'settlement.created',
-        payload: { ...payload, updated_at: Date.now() },
+      await appendEvent(isEdit ? 'settlement.updated' : 'settlement.created', {
+        ...payload,
+        updated_at: Date.now(),
       })
       await pull()
     } catch (err) {
@@ -692,10 +801,9 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // Comments are ledger events attached to an expense; author edits/deletes own.
   async function appendComment(payload, isEdit) {
     try {
-      await api(`groups/${groupId}/events`, {
-        event_id: crypto.randomUUID(),
-        type: isEdit ? 'comment.updated' : 'comment.created',
-        payload: { ...payload, updated_at: Date.now() },
+      await appendEvent(isEdit ? 'comment.updated' : 'comment.created', {
+        ...payload,
+        updated_at: Date.now(),
       })
       await pull()
     } catch (err) {
@@ -721,15 +829,35 @@ export function GroupView({ groupId, me, ai, onBack }) {
 
   if (!meta) return null
 
+  if (locked) {
+    return (
+      <section>
+        <button className="link" onClick={onBack}>
+          ← groups
+        </button>
+        <h2>{meta.name}</h2>
+        <p className="error">
+          This device has no key for this group, so nothing here can be read.
+          Open it on a device that does, or ask someone for a fresh invite link.
+        </p>
+      </section>
+    )
+  }
+
   return (
     <section>
       <button className="link" onClick={onBack}>
         ← groups
       </button>
       <h2>{meta.name}</h2>
-      <p className="muted">
-        Invite code: <code>{meta.code}</code> · synced v{version}
-      </p>
+      <p className="muted">synced v{version}</p>
+      <InviteLink groupId={groupId} code={meta.code} />
+      {unreadable > 0 && (
+        <p className="error">
+          {unreadable} entr{unreadable === 1 ? 'y' : 'ies'} could not be
+          decrypted and {unreadable === 1 ? 'was' : 'were'} skipped.
+        </p>
+      )}
 
       <h3>Balances</h3>
       <ul className="list">

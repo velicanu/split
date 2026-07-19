@@ -11,6 +11,16 @@ import { createRoot } from 'react-dom/client'
 // a component holding an interval would otherwise keep the process alive.
 let current = null
 
+// Effects now await IndexedDB and libsodium, which resolve on macrotasks —
+// act() alone returns before those settle, leaving the component mid-load.
+// Every interaction helper ends with this so assertions see a settled UI.
+export const settle = () =>
+  act(async () => {
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  })
+
 export async function mount(element) {
   await unmount()
   document.body.innerHTML = ''
@@ -18,6 +28,7 @@ export async function mount(element) {
   document.body.appendChild(container)
   const root = createRoot(container)
   await act(async () => root.render(element))
+  await settle()
   current = root
   return root
 }
@@ -37,16 +48,21 @@ export function props(el) {
   return el[key]
 }
 
-export const change = (el, value) =>
-  act(async () => props(el).onChange({ target: { value } }))
+const drive = async (fn) => {
+  await act(async () => fn())
+  await settle()
+}
 
-export const click = (el) => act(async () => props(el).onClick({}))
+export const change = (el, value) =>
+  drive(() => props(el).onChange({ target: { value } }))
+
+export const click = (el) => drive(() => props(el).onClick({}))
 
 export const upload = (el, file) =>
-  act(async () => props(el).onChange({ target: { files: [file], value: '' } }))
+  drive(() => props(el).onChange({ target: { files: [file], value: '' } }))
 
 export const submit = (form) =>
-  act(async () => props(form).onSubmit({ preventDefault() {} }))
+  drive(() => props(form).onSubmit({ preventDefault() {} }))
 
 export const $ = (sel) => document.querySelector(sel)
 export const $$ = (sel) => [...document.querySelectorAll(sel)]
