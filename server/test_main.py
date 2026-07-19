@@ -11,53 +11,12 @@ from main import app
 client = TestClient(app, base_url="https://testserver")
 
 
-def test_signup_login_flow():
-    assert client.get("/api/me").status_code == 401
-
-    r = client.post("/api/signup", json={"username": "alice", "password": "pw"})
-    assert r.status_code == 200
-    assert client.get("/api/me").json() == {"username": "alice"}
-
-    assert (
-        client.post(
-            "/api/signup", json={"username": "alice", "password": "x"}
-        ).status_code
-        == 409
-    )
-
-    client.post("/api/logout", json={})
-    assert client.get("/api/me").status_code == 401
-
-    assert (
-        client.post(
-            "/api/login", json={"username": "alice", "password": "wrong"}
-        ).status_code
-        == 401
-    )
-    assert (
-        client.post(
-            "/api/login", json={"username": "alice", "password": "pw"}
-        ).status_code
-        == 200
-    )
-    assert client.get("/api/me").json() == {"username": "alice"}
-
-
-def test_signup_requires_fields():
-    assert (
-        client.post("/api/signup", json={"username": " ", "password": "pw"}).status_code
-        == 400
-    )
-    assert (
-        client.post("/api/signup", json={"username": "bob", "password": ""}).status_code
-        == 400
-    )
-
-
 def signed_up(username):
-    c = TestClient(app, base_url="https://testserver")
-    c.post("/api/signup", json={"username": username, "password": "pw"})
-    return c
+    """A user with one enrolled device, signed in. Auth itself is covered in
+    test_auth.py; here it is only a way to get an authenticated client."""
+    from test_auth import enrolled
+
+    return enrolled(username)[0]
 
 
 def test_split_equally_distributes_remainder():
@@ -83,15 +42,20 @@ def test_group_ledger_flow():
     assert carol.get(f"/api/groups/{gid}").json()["name"] == "Trip"
     feed = events_of(carol, gid)
     assert [e["type"] for e in feed["events"]] == ["member.added"]
-    assert feed["events"][0]["payload"]["username"] == "carol"
+    assert feed["events"][0]["payload"]["display_name"] == "carol"
     assert feed["version"] == feed["events"][-1]["id"]
 
     # dave is not a member until he joins by code
     assert dave.get(f"/api/groups/{gid}").status_code == 404
     dave.post("/api/groups/join", json={"code": group["code"]})
     feed = events_of(dave, gid)
-    assert [e["payload"]["username"] for e in feed["events"]] == ["carol", "dave"]
-    ids = {e["payload"]["username"]: e["payload"]["user_id"] for e in feed["events"]}
+    assert [e["payload"]["display_name"] for e in feed["events"]] == [
+        "carol",
+        "dave",
+    ]
+    ids = {
+        e["payload"]["display_name"]: e["payload"]["user_id"] for e in feed["events"]
+    }
     before = feed["version"]
 
     # carol appends an expense.created event she paid for
@@ -169,64 +133,6 @@ def test_requires_auth():
     assert anon.get("/api/groups").status_code == 401
     assert anon.post("/api/groups", json={"name": "x"}).status_code == 401
     assert anon.get("/api/ai/settings").status_code == 401
-
-
-def test_change_password():
-    u = signed_up("pwuser")
-    # a second device signed in as the same user
-    other = TestClient(app, base_url="https://testserver")
-    other.post("/api/login", json={"username": "pwuser", "password": "pw"})
-    assert other.get("/api/me").status_code == 200
-
-    # wrong current password is rejected
-    assert (
-        u.post(
-            "/api/password", json={"current_password": "nope", "new_password": "new"}
-        ).status_code
-        == 401
-    )
-    # empty new password is rejected
-    assert (
-        u.post(
-            "/api/password", json={"current_password": "pw", "new_password": ""}
-        ).status_code
-        == 400
-    )
-
-    assert (
-        u.post(
-            "/api/password", json={"current_password": "pw", "new_password": "newpw"}
-        ).status_code
-        == 200
-    )
-    # the changing session stays signed in; other sessions are signed out
-    assert u.get("/api/me").status_code == 200
-    assert other.get("/api/me").status_code == 401
-
-    # old password no longer works, new one does
-    fresh = TestClient(app, base_url="https://testserver")
-    assert (
-        fresh.post(
-            "/api/login", json={"username": "pwuser", "password": "pw"}
-        ).status_code
-        == 401
-    )
-    assert (
-        fresh.post(
-            "/api/login", json={"username": "pwuser", "password": "newpw"}
-        ).status_code
-        == 200
-    )
-
-
-def test_change_password_requires_auth():
-    anon = TestClient(app, base_url="https://testserver")
-    assert (
-        anon.post(
-            "/api/password", json={"current_password": "a", "new_password": "b"}
-        ).status_code
-        == 401
-    )
 
 
 PNG = (

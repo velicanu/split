@@ -14,6 +14,7 @@ import {
   splitEqually,
 } from './ledger'
 import { PROVIDERS, extractReceipt, prepareImage } from './ai'
+import { changePassword, enrol, logout as signOut, resume, signup } from './auth'
 
 async function api(path, body, method) {
   const res = await fetch(`/api/${path}`, {
@@ -70,7 +71,9 @@ function Split() {
   const [checking, setChecking] = useState(true)
 
   useEffect(() => {
-    api('me')
+    // If this device already holds a key there is nothing to type — it signs
+    // the server's challenge and we're in.
+    resume()
       .then(setUser)
       .catch(() => {})
       .finally(() => setChecking(false))
@@ -81,19 +84,38 @@ function Split() {
   return <Home user={user} onLogout={() => setUser(null)} />
 }
 
+// No password ever reaches the server. Signing up mints an account key and a
+// device key; signing in on a *new* device unwraps the account key locally and
+// uses it to authorise a fresh device key. See plan/11.
 function Auth({ onAuth }) {
-  const [mode, setMode] = useState('login')
-  const [username, setUsername] = useState('')
+  const [mode, setMode] = useState('signin')
+  const [handle, setHandle] = useState('')
+  const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   async function submit(e) {
     e.preventDefault()
     setError('')
+    if (!handle.trim() || !password) {
+      return setError('Enter a handle and a password')
+    }
+    setBusy(true)
     try {
-      onAuth(await api(mode, { username, password }))
+      onAuth(
+        mode === 'signup'
+          ? await signup({
+              login_handle: handle.trim(),
+              display_name: displayName.trim() || handle.trim(),
+              password,
+            })
+          : await enrol({ login_handle: handle.trim(), password })
+      )
     } catch (err) {
       setError(err.message)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -102,32 +124,49 @@ function Auth({ onAuth }) {
       <h1>Split</h1>
       <form onSubmit={submit}>
         <input
-          placeholder="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          placeholder="handle"
+          value={handle}
+          onChange={(e) => setHandle(e.target.value)}
           autoComplete="username"
         />
+        {mode === 'signup' && (
+          <input
+            placeholder="display name (optional)"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+          />
+        )}
         <input
           type="password"
           placeholder="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+          autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
         />
-        <button type="submit">{mode === 'login' ? 'Log in' : 'Sign up'}</button>
+        <button type="submit" disabled={busy}>
+          {busy
+            ? 'working…'
+            : mode === 'signup'
+              ? 'Sign up'
+              : 'Sign in on this device'}
+        </button>
       </form>
       {error && <p className="error">{error}</p>}
+      <p className="muted">
+        Your password never leaves this device — it unlocks your keys here. That
+        also means nobody can reset it for you.
+      </p>
       <p>
-        {mode === 'login' ? 'No account?' : 'Have an account?'}{' '}
+        {mode === 'signup' ? 'Have an account?' : 'No account?'}{' '}
         <a
           href="#"
           onClick={(e) => {
             e.preventDefault()
             setError('')
-            setMode(mode === 'login' ? 'signup' : 'login')
+            setMode(mode === 'signup' ? 'signin' : 'signup')
           }}
         >
-          {mode === 'login' ? 'Sign up' : 'Log in'}
+          {mode === 'signup' ? 'Sign in' : 'Sign up'}
         </a>
       </p>
     </main>
@@ -152,7 +191,9 @@ function Home({ user, onLogout }) {
   }, [loadAi])
 
   async function logout() {
-    await api('logout', {})
+    // Ends the session but keeps this device's key: it's still enrolled, so
+    // signing back in needs no password. Revoking is the deliberate act.
+    await signOut()
     onLogout()
   }
 
@@ -169,7 +210,7 @@ function Home({ user, onLogout }) {
           Split
         </strong>
         <span className="spacer" />
-        <span className="muted">{user.username}</span>
+        <span className="muted">{user.display_name}</span>
         <button className="link" onClick={() => setShowSettings(true)}>
           settings
         </button>
@@ -180,6 +221,7 @@ function Home({ user, onLogout }) {
       {showSettings ? (
         <Settings
           ai={ai}
+          user={user}
           onChanged={loadAi}
           onClose={() => setShowSettings(false)}
         />
@@ -201,7 +243,7 @@ const maskKey = (key) => `…${String(key).slice(-4)}`
 
 // Provider settings. There is no default provider — with no keys the scanning
 // feature simply doesn't exist. Adding a key (or switching) makes it active.
-function Settings({ ai, onChanged, onClose }) {
+function Settings({ ai, user, onChanged, onClose }) {
   const [drafts, setDrafts] = useState({})
   const [error, setError] = useState('')
 
@@ -311,12 +353,13 @@ function Settings({ ai, onChanged, onClose }) {
       {error && <p className="error">{error}</p>}
 
       <h2>Account</h2>
-      <PasswordForm />
+      <PasswordForm user={user} />
+      <Devices />
     </section>
   )
 }
 
-function PasswordForm() {
+function PasswordForm({ user }) {
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -330,11 +373,18 @@ function PasswordForm() {
     if (!next) return setError('Enter a new password')
     if (next !== confirm) return setError('New passwords do not match')
     try {
-      await api('password', { current_password: current, new_password: next })
+      // Re-wraps the account key on this device and replaces the stored blob.
+      // Other devices keep their own keys and stay signed in — a password is
+      // for unlocking a *new* device, not for holding a session open.
+      await changePassword({
+        login_handle: user.login_handle,
+        current,
+        next,
+      })
       setCurrent('')
       setNext('')
       setConfirm('')
-      setDone('Password changed — your other devices have been signed out.')
+      setDone('Password changed. Use it next time you set up a new device.')
     } catch (err) {
       setError(err.message)
     }
@@ -368,6 +418,70 @@ function PasswordForm() {
       {done && <p className="muted">{done}</p>}
       {error && <p className="error">{error}</p>}
     </form>
+  )
+}
+
+// Every device holds its own key, so revoking one is real rather than
+// advisory: it can't authenticate afterwards, and it can't enrol a
+// replacement because its own key is the only one it ever had.
+function Devices() {
+  const [devices, setDevices] = useState(null)
+  const [error, setError] = useState('')
+
+  const load = useCallback(
+    () =>
+      api('devices')
+        .then((r) => setDevices(r.devices))
+        .catch((e) => setError(e.message)),
+    []
+  )
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function revoke(id) {
+    setError('')
+    try {
+      await api(`devices/${id}`, undefined, 'DELETE')
+      await load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const live = (devices || []).filter((d) => !d.revoked_at)
+
+  return (
+    <section>
+      <h3>Devices</h3>
+      <p className="muted">
+        Lost a device? Revoke it here and it loses access immediately. It keeps
+        anything it had already downloaded — that can&rsquo;t be undone.
+      </p>
+      {devices === null && <p className="muted">Loading…</p>}
+      <ul className="list">
+        {live.map((d) => (
+          <li key={d.id} className="row static">
+            <div className="expense">
+              <span>
+                {d.label}
+                {d.current ? ' · this device' : ''}
+              </span>
+              <span className="muted">added {d.created_at}</span>
+            </div>
+            {!d.current && (
+              <button
+                className="link danger"
+                onClick={() => revoke(d.id)}
+              >
+                revoke
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error && <p className="error">{error}</p>}
+    </section>
   )
 }
 
@@ -630,7 +744,7 @@ export function GroupView({ groupId, me, ai, onBack }) {
       <ul className="list">
         {state.balances.map((b) => (
           <li key={b.user_id} className="row static">
-            <span>{b.username}</span>
+            <span>{b.display_name}</span>
             <span className={b.net_cents >= 0 ? 'pos' : 'neg'}>
               {b.net_cents === 0
                 ? 'settled up'
@@ -756,7 +870,7 @@ function ExpenseDetail({
   onEdit,
   onDelete,
 }) {
-  const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
+  const nameById = Object.fromEntries(members.map((m) => [m.id, m.display_name]))
   const [text, setText] = useState('')
   const [editId, setEditId] = useState(null)
   const [editText, setEditText] = useState('')
@@ -976,7 +1090,9 @@ function ExpenseDetail({
 }
 
 function memberIdFor(members, me) {
-  const mine = members.find((m) => m.username === me.username)
+  // By id: display names are not unique, so matching on one could silently
+  // attribute an expense to the wrong person.
+  const mine = members.find((m) => m.id === me?.id)
   return (mine || members[0])?.id
 }
 
@@ -1046,7 +1162,7 @@ function ReceiptEditor({
                     checked={it.claimed_by.includes(m.id)}
                     onChange={() => toggleClaim(idx, m.id)}
                   />
-                  {m.username}
+                  {m.display_name}
                 </label>
               ))}
             </div>
@@ -1608,7 +1724,7 @@ export function ExpenseForm({
                 checked={checked}
                 onChange={() => toggle(payerIds, setPayerIds, m.id)}
               />
-              {m.username}
+              {m.display_name}
               {checked && payerIds.length > 1 && (
                 <input
                   className="pay-amt"
@@ -1764,7 +1880,7 @@ export function ExpenseForm({
                 checked={!excluded.includes(m.id)}
                 onChange={() => toggle(excluded, setExcluded, m.id)}
               />
-              {m.username}
+              {m.display_name}
             </label>
           ))}
         </fieldset>
@@ -1818,7 +1934,7 @@ export function ExpenseForm({
           </legend>
           {members.map((m) => (
             <label key={m.id} className="check">
-              {m.username}
+              {m.display_name}
               <input
                 className="pay-amt"
                 inputMode="decimal"

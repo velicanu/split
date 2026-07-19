@@ -19,9 +19,10 @@ import {
 } from './react.mjs'
 
 const MEMBERS = [
-  { id: 1, username: 'v' },
-  { id: 2, username: 'd' },
+  { id: 1, display_name: 'v' },
+  { id: 2, display_name: 'd' },
 ]
+const ME = { id: 1, display_name: 'v' }
 const AI = {
   active: 'openai',
   providers: { openai: { api_key: 'sk-test', model: 'gpt-5.4-nano' } },
@@ -80,7 +81,7 @@ async function render(ai = AI) {
     <ExpenseForm
       groupId={7}
       members={MEMBERS}
-      me="v"
+      me={ME}
       ai={ai}
       onSubmit={(e) => saved.push(e)}
       onCancel={() => {}}
@@ -236,6 +237,47 @@ describe('saving a scanned receipt', () => {
   })
 })
 
+describe('working out which member I am', () => {
+  // Display names stopped being unique when login handles took over identity,
+  // so matching on one would quietly bill the wrong person.
+  const TWO_DAVES = [
+    { id: 1, display_name: 'dave' },
+    { id: 2, display_name: 'dave' },
+  ]
+
+  const renderAs = (me) =>
+    mount(
+      <ExpenseForm
+        groupId={7}
+        members={TWO_DAVES}
+        me={me}
+        ai={{ active: null, providers: {} }}
+        onSubmit={(e) => saved.push(e)}
+        onCancel={() => {}}
+      />
+    )
+
+  test('defaults the payer to me by id, not by name', async () => {
+    serve()
+    saved = []
+    await renderAs({ id: 2, display_name: 'dave' })
+    await change($('input'), 'Lunch')
+    await change(amountField(), '10.00')
+    await submit($('form'))
+    assert.deepEqual(saved[0].payers, [{ user_id: 2, paid_cents: 1000 }])
+  })
+
+  test('and picks the other Dave when that is who I am', async () => {
+    serve()
+    saved = []
+    await renderAs({ id: 1, display_name: 'dave' })
+    await change($('input'), 'Lunch')
+    await change(amountField(), '10.00')
+    await submit($('form'))
+    assert.deepEqual(saved[0].payers, [{ user_id: 1, paid_cents: 1000 }])
+  })
+})
+
 describe('the receipt controls', () => {
   const NO_AI = { active: null, providers: {} }
 
@@ -345,7 +387,7 @@ describe('re-scanning a stored receipt', () => {
       <ExpenseForm
         groupId={7}
         members={MEMBERS}
-        me="v"
+        me={ME}
         ai={AI}
         scanOnOpen="stored-1"
         onSubmit={(e) => saved.push(e)}
@@ -373,7 +415,7 @@ describe('an expense that already has receipts', () => {
       <ExpenseForm
         groupId={7}
         members={MEMBERS}
-        me="v"
+        me={ME}
         ai={AI}
         initial={{
           expense_id: 'e1',

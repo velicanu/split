@@ -1,18 +1,21 @@
 import base64
 import binascii
-import hmac
 import json
 import os
 import secrets
 import sqlite3
-from hashlib import scrypt
+import time
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 DB_PATH = os.environ.get("DB_PATH", "split.db")
 COOKIE = "split_session"
+# A challenge is single-use; this only bounds how long an unused one lingers.
+CHALLENGE_TTL_SECONDS = 300
 
 
 def db():
@@ -23,17 +26,53 @@ def db():
 
 def init_db():
     with db() as conn:
+        # No password material here at all. The server authenticates a signature
+        # from a registered device key, so it holds nothing that could be used
+        # to impersonate a user or decrypt their data.
+        #
+        # login_handle is unique only so a device with no keys yet can find its
+        # wrapped account key. display_name is what people actually see and is
+        # deliberately NOT unique.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS users ("
             " id INTEGER PRIMARY KEY,"
-            " username TEXT UNIQUE NOT NULL,"
-            " salt BLOB NOT NULL,"
-            " pw_hash BLOB NOT NULL)"
+            " login_handle TEXT UNIQUE NOT NULL,"
+            " display_name TEXT NOT NULL,"
+            " account_pubkey TEXT NOT NULL)"
+        )
+        # The account private key, encrypted client-side. Opaque here.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS key_wraps ("
+            " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " method TEXT NOT NULL,"
+            " params TEXT NOT NULL,"
+            " ciphertext TEXT NOT NULL,"
+            " PRIMARY KEY (user_id, method))"
+        )
+        # One row per device. Revoking sets revoked_at: the device can no longer
+        # authenticate, and — because it only ever held its own key — cannot
+        # enrol a replacement either.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS devices ("
+            " id TEXT PRIMARY KEY,"
+            " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " pubkey TEXT UNIQUE NOT NULL,"
+            " box_pubkey TEXT NOT NULL,"
+            " label TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+            " revoked_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS challenges ("
+            " nonce TEXT PRIMARY KEY,"
+            " pubkey TEXT NOT NULL,"
+            " expires_at REAL NOT NULL)"
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sessions ("
             " token TEXT PRIMARY KEY,"
-            " user_id INTEGER NOT NULL REFERENCES users(id))"
+            " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " device_id TEXT NOT NULL REFERENCES devices(id))"
         )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS groups ("
@@ -93,18 +132,57 @@ def init_db():
         )
 
 
-def hash_pw(password: str, salt: bytes) -> bytes:
-    return scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+def verify_sig(pubkey_b64: str, message: bytes, sig_b64: str) -> bool:
+    """Ed25519 detached verification. Any malformed input is just a failure —
+    this sits on unauthenticated endpoints, so it must not raise."""
+    try:
+        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(pubkey_b64))
+        key.verify(base64.b64decode(sig_b64), message)
+        return True
+    except (InvalidSignature, ValueError, binascii.Error):
+        return False
 
 
-class Credentials(BaseModel):
-    username: str
-    password: str
+class WrapIn(BaseModel):
+    method: str
+    params: str
+    ciphertext: str
 
 
-class PasswordChange(BaseModel):
-    current_password: str
-    new_password: str
+class SignupIn(BaseModel):
+    login_handle: str
+    display_name: str
+    account_pubkey: str
+    device_pubkey: str
+    box_pubkey: str
+    label: str = "this device"
+    wraps: list[WrapIn] = []
+
+
+class ChallengeIn(BaseModel):
+    device_pubkey: str
+
+
+class VerifyIn(BaseModel):
+    device_pubkey: str
+    nonce: str
+    signature: str
+
+
+class DeviceIn(BaseModel):
+    pubkey: str
+    box_pubkey: str
+    label: str = "new device"
+    # Who authorised this enrolment: a device that is already trusted, or the
+    # account key (the no-live-device path). The signature is over the new
+    # device's own public key, which binds the authorisation to this device.
+    signed_by: str  # 'device' | 'account'
+    signer_pubkey: str
+    signature: str
+
+
+class WrapsReplace(BaseModel):
+    wraps: list[WrapIn]
 
 
 class GroupCreate(BaseModel):
@@ -142,11 +220,12 @@ app = FastAPI()
 init_db()
 
 
-def start_session(response: Response, user_id: int) -> None:
+def start_session(response: Response, user_id: int, device_id: str) -> None:
     token = secrets.token_hex(32)
     with db() as conn:
         conn.execute(
-            "INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id)
+            "INSERT INTO sessions (token, user_id, device_id) VALUES (?, ?, ?)",
+            (token, user_id, device_id),
         )
     response.set_cookie(COOKIE, token, httponly=True, samesite="lax", secure=True)
 
@@ -156,45 +235,195 @@ def current_user(request: Request):
     if not token:
         return None
     with db() as conn:
+        # Joining devices is what makes revocation bite: revoke the device and
+        # every session it holds stops resolving, immediately.
         return conn.execute(
-            "SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id"
-            " WHERE s.token = ?",
+            "SELECT u.id, u.login_handle, u.display_name, s.device_id"
+            " FROM sessions s"
+            " JOIN users u ON u.id = s.user_id"
+            " JOIN devices d ON d.id = s.device_id"
+            " WHERE s.token = ? AND d.revoked_at IS NULL",
             (token,),
         ).fetchone()
 
 
+def new_challenge(conn, pubkey: str) -> str:
+    nonce = secrets.token_urlsafe(32)
+    conn.execute("DELETE FROM challenges WHERE expires_at < ?", (time.time(),))
+    conn.execute(
+        "INSERT INTO challenges (nonce, pubkey, expires_at) VALUES (?, ?, ?)",
+        (nonce, pubkey, time.time() + CHALLENGE_TTL_SECONDS),
+    )
+    return nonce
+
+
+def take_challenge(conn, nonce: str, pubkey: str) -> bool:
+    """Single use: consumed whether or not it turns out to be valid."""
+    row = conn.execute(
+        "SELECT pubkey, expires_at FROM challenges WHERE nonce = ?", (nonce,)
+    ).fetchone()
+    if not row:
+        return False
+    conn.execute("DELETE FROM challenges WHERE nonce = ?", (nonce,))
+    return row["pubkey"] == pubkey and row["expires_at"] >= time.time()
+
+
+@app.post("/api/auth/challenge")
+def auth_challenge(body: ChallengeIn):
+    with db() as conn:
+        # Issued for any key: replying that a key is unknown would leak which
+        # devices exist. An unknown key simply fails at /verify instead.
+        return {"nonce": new_challenge(conn, body.device_pubkey)}
+
+
+@app.post("/api/auth/verify")
+def auth_verify(body: VerifyIn, response: Response):
+    with db() as conn:
+        fresh = take_challenge(conn, body.nonce, body.device_pubkey)
+        device = conn.execute(
+            "SELECT id, user_id FROM devices WHERE pubkey = ? AND revoked_at IS NULL",
+            (body.device_pubkey,),
+        ).fetchone()
+    if not fresh or not device:
+        raise HTTPException(401, "authentication failed")
+    if not verify_sig(body.device_pubkey, body.nonce.encode(), body.signature):
+        raise HTTPException(401, "authentication failed")
+    start_session(response, device["user_id"], device["id"])
+    return {"ok": True}
+
+
 @app.post("/api/signup")
-def signup(creds: Credentials, response: Response):
-    username = creds.username.strip()
-    if not username or not creds.password:
-        raise HTTPException(400, "username and password required")
-    salt = secrets.token_bytes(16)
+def signup(body: SignupIn, response: Response):
+    handle = body.login_handle.strip()
+    display = body.display_name.strip() or handle
+    if not handle:
+        raise HTTPException(400, "login handle required")
+    if not body.account_pubkey or not body.device_pubkey or not body.box_pubkey:
+        raise HTTPException(400, "keys required")
     try:
         with db() as conn:
             cur = conn.execute(
-                "INSERT INTO users (username, salt, pw_hash) VALUES (?, ?, ?)",
-                (username, salt, hash_pw(creds.password, salt)),
+                "INSERT INTO users (login_handle, display_name, account_pubkey)"
+                " VALUES (?, ?, ?)",
+                (handle, display, body.account_pubkey),
             )
             user_id = cur.lastrowid
+            device_id = secrets.token_urlsafe(12)
+            conn.execute(
+                "INSERT INTO devices (id, user_id, pubkey, box_pubkey, label)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (device_id, user_id, body.device_pubkey, body.box_pubkey, body.label),
+            )
+            for w in body.wraps:
+                conn.execute(
+                    "INSERT INTO key_wraps (user_id, method, params, ciphertext)"
+                    " VALUES (?, ?, ?, ?)",
+                    (user_id, w.method, w.params, w.ciphertext),
+                )
     except sqlite3.IntegrityError:
-        raise HTTPException(409, "username already taken")
-    start_session(response, user_id)
-    return {"username": username}
+        raise HTTPException(409, "login handle already taken") from None
+    start_session(response, user_id, device_id)
+    return {"display_name": display, "login_handle": handle}
 
 
-@app.post("/api/login")
-def login(creds: Credentials, response: Response):
+@app.get("/api/wraps")
+def get_wraps(login_handle: str):
+    """Hands the encrypted account key to a device that has no keys yet.
+
+    Deliberately unauthenticated — there is nothing to authenticate *with* at
+    this point. The blob is useless without the password, and Argon2id is what
+    stands between a leaked blob and the data. See plan/11."""
     with db() as conn:
         user = conn.execute(
-            "SELECT id, username, salt, pw_hash FROM users WHERE username = ?",
-            (creds.username.strip(),),
+            "SELECT id, account_pubkey FROM users WHERE login_handle = ?",
+            (login_handle.strip(),),
         ).fetchone()
-    if not user or not hmac.compare_digest(
-        user["pw_hash"], hash_pw(creds.password, user["salt"])
-    ):
-        raise HTTPException(401, "invalid username or password")
-    start_session(response, user["id"])
-    return {"username": user["username"]}
+        if not user:
+            # Same shape as a real answer with no wraps, so this doesn't become
+            # an oracle for which handles exist.
+            return {"account_pubkey": None, "wraps": []}
+        rows = conn.execute(
+            "SELECT method, params, ciphertext FROM key_wraps WHERE user_id = ?",
+            (user["id"],),
+        ).fetchall()
+    return {
+        "account_pubkey": user["account_pubkey"],
+        "wraps": [dict(r) for r in rows],
+    }
+
+
+@app.get("/api/devices")
+def list_devices(request: Request):
+    user = require_user(request)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, label, created_at, revoked_at FROM devices"
+            " WHERE user_id = ? ORDER BY created_at",
+            (user["id"],),
+        ).fetchall()
+    return {
+        "devices": [{**dict(r), "current": r["id"] == user["device_id"]} for r in rows]
+    }
+
+
+@app.post("/api/devices")
+def add_device(body: DeviceIn, request: Request, response: Response):
+    """Enrol a device. Authority comes from a signature, not from a session:
+    either a device that is already trusted, or the account key (the no-live-
+    device path). Signing the new device's own public key binds the two."""
+    if body.signed_by not in ("device", "account"):
+        raise HTTPException(400, "signed_by must be 'device' or 'account'")
+
+    with db() as conn:
+        if body.signed_by == "account":
+            signer = conn.execute(
+                "SELECT id AS user_id FROM users WHERE account_pubkey = ?",
+                (body.signer_pubkey,),
+            ).fetchone()
+        else:
+            # A revoked device must not be able to enrol a replacement — that is
+            # the whole point of revoking it.
+            signer = conn.execute(
+                "SELECT user_id FROM devices WHERE pubkey = ? AND revoked_at IS NULL",
+                (body.signer_pubkey,),
+            ).fetchone()
+        if not signer or not verify_sig(
+            body.signer_pubkey, body.pubkey.encode(), body.signature
+        ):
+            raise HTTPException(401, "invalid authorisation")
+        user_id = signer["user_id"]
+
+        device_id = secrets.token_urlsafe(12)
+        try:
+            conn.execute(
+                "INSERT INTO devices (id, user_id, pubkey, box_pubkey, label)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (device_id, user_id, body.pubkey, body.box_pubkey, body.label),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "device already enrolled") from None
+    return {"device_id": device_id}
+
+
+@app.delete("/api/devices/{device_id}")
+def revoke_device(device_id: str, request: Request):
+    user = require_user(request)
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id FROM devices WHERE id = ? AND user_id = ?",
+            (device_id, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "device not found")
+        conn.execute(
+            "UPDATE devices SET revoked_at = datetime('now')"
+            " WHERE id = ? AND revoked_at IS NULL",
+            (device_id,),
+        )
+        # Drop its sessions too, so revocation takes effect on the next request
+        # rather than whenever its cookie happens to expire.
+        conn.execute("DELETE FROM sessions WHERE device_id = ?", (device_id,))
+    return {"ok": True}
 
 
 @app.post("/api/logout")
@@ -212,34 +441,33 @@ def me(request: Request):
     user = current_user(request)
     if not user:
         raise HTTPException(401, "not logged in")
-    return {"username": user["username"]}
+    return {
+        # id, because display names are not unique — a client must not try to
+        # work out which member it is by matching on a name.
+        "id": user["id"],
+        "login_handle": user["login_handle"],
+        "display_name": user["display_name"],
+        "device_id": user["device_id"],
+    }
 
 
-@app.post("/api/password")
-def change_password(body: PasswordChange, request: Request):
+@app.put("/api/wraps")
+def replace_wraps(body: WrapsReplace, request: Request):
+    """Changing your password is re-wrapping the account key on the client and
+    replacing the blob. The server verifies nothing about it — it cannot: it
+    has never seen the old password and will never see the new one, and it
+    holds no plaintext to check the result against."""
     user = require_user(request)
-    if not body.new_password:
-        raise HTTPException(400, "new password required")
+    if not body.wraps:
+        raise HTTPException(400, "at least one wrap required")
     with db() as conn:
-        row = conn.execute(
-            "SELECT salt, pw_hash FROM users WHERE id = ?", (user["id"],)
-        ).fetchone()
-    if not hmac.compare_digest(
-        row["pw_hash"], hash_pw(body.current_password, row["salt"])
-    ):
-        raise HTTPException(401, "current password is incorrect")
-    salt = secrets.token_bytes(16)
-    keep = request.cookies.get(COOKIE)
-    with db() as conn:
-        conn.execute(
-            "UPDATE users SET salt = ?, pw_hash = ? WHERE id = ?",
-            (salt, hash_pw(body.new_password, salt), user["id"]),
-        )
-        # Changing the password signs out this account's other sessions.
-        conn.execute(
-            "DELETE FROM sessions WHERE user_id = ? AND token != ?",
-            (user["id"], keep),
-        )
+        conn.execute("DELETE FROM key_wraps WHERE user_id = ?", (user["id"],))
+        for w in body.wraps:
+            conn.execute(
+                "INSERT INTO key_wraps (user_id, method, params, ciphertext)"
+                " VALUES (?, ?, ?, ?)",
+                (user["id"], w.method, w.params, w.ciphertext),
+            )
     return {"ok": True}
 
 
@@ -303,7 +531,7 @@ def add_member(conn, group_id, user):
         group_id,
         secrets.token_hex(16),
         "member.added",
-        {"user_id": user["id"], "username": user["username"]},
+        {"user_id": user["id"], "display_name": user["display_name"]},
         user["id"],
     )
     return True

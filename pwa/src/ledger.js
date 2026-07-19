@@ -78,7 +78,7 @@ export function computeState(events) {
   for (const e of events) {
     if (e.type === 'member.added') {
       if (!memberIds.includes(e.payload.user_id)) {
-        members.push({ id: e.payload.user_id, username: e.payload.username })
+        members.push({ id: e.payload.user_id, display_name: e.payload.display_name })
         memberIds.push(e.payload.user_id)
       }
     } else if (e.type === 'expense.created' || e.type === 'expense.updated') {
@@ -131,7 +131,7 @@ export function computeState(events) {
     }
   })
 
-  const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
+  const nameById = Object.fromEntries(members.map((m) => [m.id, m.display_name]))
 
   const paid = {}
   const owed = {}
@@ -169,7 +169,7 @@ export function computeState(events) {
     a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1
   const balances = members.map((m) => ({
     user_id: m.id,
-    username: m.username,
+    display_name: m.display_name,
     net_cents: paid[m.id] - owed[m.id],
   }))
   // Comments grouped under their expense, newest-created last (chronological).
@@ -217,11 +217,11 @@ export function computeState(events) {
 export function simplify(balances) {
   const debtors = balances
     .filter((b) => b.net_cents < 0)
-    .map((b) => ({ id: b.user_id, name: b.username, net: b.net_cents }))
+    .map((b) => ({ id: b.user_id, name: b.display_name, net: b.net_cents }))
     .sort((a, b) => a.net - b.net || a.id - b.id)
   const creditors = balances
     .filter((b) => b.net_cents > 0)
-    .map((b) => ({ id: b.user_id, name: b.username, net: b.net_cents }))
+    .map((b) => ({ id: b.user_id, name: b.display_name, net: b.net_cents }))
     .sort((a, b) => b.net - a.net || a.id - b.id)
 
   const transfers = []
