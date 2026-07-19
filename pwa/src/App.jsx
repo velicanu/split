@@ -451,12 +451,16 @@ function GroupList({ onOpen }) {
   )
 }
 
-function GroupView({ groupId, me, ai, onBack }) {
+export function GroupView({ groupId, me, ai, onBack }) {
   const [meta, setMeta] = useState(null)
   const [events, setEvents] = useState([])
   const [version, setVersion] = useState(0)
   const [editing, setEditing] = useState(null) // null = add mode; else an expense
   const [viewingId, setViewingId] = useState(null) // expense_id shown in detail
+  // Bumped to remount (and so reset) the add-expense form after a create.
+  const [formNonce, setFormNonce] = useState(0)
+  // A receipt to scan as soon as the edit form opens, set by the detail view.
+  const [scanReceipt, setScanReceipt] = useState(null)
   const [error, setError] = useState('')
   const versionRef = useRef(0)
 
@@ -506,6 +510,11 @@ function GroupView({ groupId, me, ai, onBack }) {
       payload,
     })
     setEditing(null)
+    setScanReceipt(null)
+    // Leaving an edit already remounts the form (the key changes back), but
+    // creating doesn't — so the draft, receipts and all, would otherwise sit
+    // there after the expense was filed. Bump the key to get a clean form.
+    setFormNonce((n) => n + 1)
     await pull()
   }
 
@@ -515,14 +524,18 @@ function GroupView({ groupId, me, ai, onBack }) {
       await api(`groups/${groupId}/events`, {
         event_id: crypto.randomUUID(),
         type: 'expense.updated',
+        // Carry every field forward: a revision replaces the expense wholesale,
+        // so anything left out here is destroyed by a delete or a restore.
         payload: {
           expense_id: x.expense_id,
           description: x.description,
           amount_cents: x.amount_cents,
           payers: x.payers,
           splits: x.splits,
+          split: x.split,
           date: x.date,
           category: x.category,
+          receipts: x.receipts,
           deleted,
           updated_at: Date.now(),
         },
@@ -634,14 +647,18 @@ function GroupView({ groupId, me, ai, onBack }) {
 
       {state.members.length > 0 && (
         <ExpenseForm
-          key={editing?.expense_id || 'new'}
+          key={editing?.expense_id || `new-${formNonce}`}
           groupId={groupId}
           members={state.members}
           me={me}
           ai={ai}
           initial={editing}
+          scanOnOpen={scanReceipt}
           onSubmit={submitExpense}
-          onCancel={() => setEditing(null)}
+          onCancel={() => {
+            setEditing(null)
+            setScanReceipt(null)
+          }}
         />
       )}
 
@@ -707,6 +724,15 @@ function GroupView({ groupId, me, ai, onBack }) {
           expense={viewing}
           members={state.members}
           meId={meId}
+          ai={ai}
+          // Scanning a stored receipt opens the expense for editing with the
+          // scan already running: the result has to land somewhere editable,
+          // and that's the form.
+          onScan={(receiptId) => {
+            setViewingId(null)
+            setEditing(viewing)
+            setScanReceipt(receiptId)
+          }}
           onClose={() => setViewingId(null)}
           onPost={postComment}
           onEdit={editComment}
@@ -719,7 +745,17 @@ function GroupView({ groupId, me, ai, onBack }) {
 
 // Detail overlay for one expense: per-person paid/owed, plus comments (anyone
 // can post; you may edit/delete your own).
-function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDelete }) {
+function ExpenseDetail({
+  expense,
+  members,
+  meId,
+  ai,
+  onScan,
+  onClose,
+  onPost,
+  onEdit,
+  onDelete,
+}) {
   const nameById = Object.fromEntries(members.map((m) => [m.id, m.username]))
   const [text, setText] = useState('')
   const [editId, setEditId] = useState(null)
@@ -770,18 +806,31 @@ function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDele
             <h4>Receipts</h4>
             <div className="receipt-strip">
               {expense.receipts.map((rid) => (
-                <a
-                  key={rid}
-                  href={`/api/receipts/${rid}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <img
-                    className="receipt-thumb"
-                    src={`/api/receipts/${rid}`}
-                    alt="receipt"
-                  />
-                </a>
+                <div key={rid} className="receipt-cell">
+                  <a
+                    href={`/api/receipts/${rid}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <img
+                      className="receipt-thumb"
+                      src={`/api/receipts/${rid}`}
+                      alt="receipt"
+                    />
+                  </a>
+                  {/* Re-reading a receipt belongs with the receipt, on the
+                      expense it's attached to — not on the add form, which
+                      has no business holding one past creation. */}
+                  {ai?.active && (
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => onScan(rid)}
+                    >
+                      {expense.split?.mode === 'items' ? 'rescan' : 'scan'}
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           </>
@@ -1182,6 +1231,7 @@ export function ExpenseForm({
   me,
   ai,
   initial,
+  scanOnOpen,
   onSubmit,
   onCancel,
 }) {
@@ -1361,6 +1411,16 @@ export function ExpenseForm({
       setError(err.message)
     }
   }
+
+  // Opened from the detail view's scan button: read that receipt once, as the
+  // form mounts. The ref guards against a second run on re-render.
+  const scanned = useRef(false)
+  useEffect(() => {
+    if (scanOnOpen && !scanned.current) {
+      scanned.current = true
+      rescan(scanOnOpen)
+    }
+  }, [scanOnOpen])
 
   async function submit(e) {
     e.preventDefault()
@@ -1617,27 +1677,18 @@ export function ExpenseForm({
                   alt="receipt"
                 />
               </a>
-              <div className="row-actions">
-                {ai?.active && (
-                  <button
-                    type="button"
-                    className="link"
-                    disabled={scanning}
-                    onClick={() => rescan(rid)}
-                  >
-                    {scanning ? 'scanning…' : 'scan'}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="link danger"
-                  onClick={() =>
-                    setReceipts((prev) => prev.filter((id) => id !== rid))
-                  }
-                >
-                  remove
-                </button>
-              </div>
+              {/* No scan button here: re-reading a receipt lives on the
+                  expense's detail view, once there's an expense to attach
+                  the result to. */}
+              <button
+                type="button"
+                className="link danger"
+                onClick={() =>
+                  setReceipts((prev) => prev.filter((id) => id !== rid))
+                }
+              >
+                remove
+              </button>
             </div>
           ))}
         </fieldset>

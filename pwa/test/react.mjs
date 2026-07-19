@@ -7,13 +7,27 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 
+// Unmounts whatever was mounted before, so effect cleanups actually run —
+// a component holding an interval would otherwise keep the process alive.
+let current = null
+
 export async function mount(element) {
+  await unmount()
   document.body.innerHTML = ''
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
   await act(async () => root.render(element))
+  current = root
   return root
+}
+
+export async function unmount() {
+  if (current) {
+    const root = current
+    current = null
+    await act(async () => root.unmount())
+  }
 }
 
 export function props(el) {

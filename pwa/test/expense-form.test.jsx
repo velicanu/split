@@ -338,17 +338,31 @@ describe('scanning keeps the receipt too', () => {
 })
 
 describe('re-scanning a stored receipt', () => {
+  // Driven by the detail view, which opens the form with a receipt to read.
   test('reads the stored image without uploading it again', async () => {
+    serve()
+    await mount(
+      <ExpenseForm
+        groupId={7}
+        members={MEMBERS}
+        me="v"
+        ai={AI}
+        scanOnOpen="stored-1"
+        onSubmit={(e) => saved.push(e)}
+        onCancel={() => {}}
+      />
+    )
+    assert.equal($('select').value, 'items')
+    assert.deepEqual(itemNames(), ['Burger', 'Wine'])
+    assert.equal(uploaded.length, 0, 'a re-scan must not re-upload the image')
+  })
+
+  test('attaching alone never scans', async () => {
     serve()
     await render()
     await pickAttachment()
-    assert.equal($('select').value, 'equal', 'attaching alone must not scan')
-
-    await click(byText('button', 'scan'))
-    assert.equal($('select').value, 'items')
-    assert.deepEqual(itemNames(), ['Burger', 'Wine'])
-    assert.equal(uploaded.length, 1, 'a re-scan must not duplicate the image')
-    assert.equal(thumbs().length, 1)
+    assert.equal($('select').value, 'equal')
+    assert.equal($$('.item-head').length, 0)
   })
 })
 
