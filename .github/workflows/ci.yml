@@ -26,6 +26,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+      # No lockfile yet, matching the Dockerfile's `npm install`.
+      - run: npm install
+        working-directory: pwa
       - run: npm test
         working-directory: pwa
 

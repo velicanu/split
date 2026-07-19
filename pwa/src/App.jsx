@@ -1142,7 +1142,7 @@ function Payments({ payments, onEdit, onDelete }) {
   )
 }
 
-function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
+export function ExpenseForm({ members, me, ai, initial, onSubmit, onCancel }) {
   const [scanning, setScanning] = useState(false)
   const today = new Date().toISOString().slice(0, 10)
   const [description, setDescription] = useState(initial?.description ?? '')
