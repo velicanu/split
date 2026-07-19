@@ -62,10 +62,43 @@ export function receiptWeights(items, participantIds) {
   return weights
 }
 
+// Resolve a chain of merges to whoever the person is now. Merges compose —
+// lose your account twice and you get A -> B -> C — and a malformed pair could
+// name a cycle, so this walks with a guard rather than trusting the data.
+function resolver(alias) {
+  const cache = new Map()
+  return function resolve(id) {
+    if (cache.has(id)) return cache.get(id)
+    const chain = [id]
+    const seen = new Set([id])
+    let current = id
+    while (alias.has(current)) {
+      const next = alias.get(current)
+      if (seen.has(next)) {
+        // A cycle — nonsense data, but it still has to fold to *something*,
+        // and every client must pick the same something. Stopping mid-walk
+        // instead would let both ends of a two-way merge vanish, taking their
+        // balances with them.
+        current = Math.min(...chain.slice(chain.indexOf(next)))
+        break
+      }
+      seen.add(next)
+      chain.push(next)
+      current = next
+    }
+    for (const node of chain) cache.set(node, current)
+    return current
+  }
+}
+
 // Fold events (in ascending id / total order) into the displayable state.
 export function computeState(events) {
   const members = []
   const memberIds = []
+  // old member id -> the account that person uses now. Losing every device
+  // means starting a new account; this is what reattaches their history to
+  // them instead of stranding it under an identity nobody can sign for.
+  const alias = new Map()
   // expense_id -> its latest event. An edit is just a new expense.updated row
   // with the same expense_id; the latest one wins (append order is the total
   // order). Both payers and splits are frozen per revision.
@@ -98,6 +131,11 @@ export function computeState(events) {
       if (!p || !p.settlement_id) continue
       const prev = settle[p.settlement_id]
       if (!prev || e.id > prev.id) settle[p.settlement_id] = e
+    } else if (e.type === 'member.merged') {
+      const p = e.payload
+      if (!p || !p.old_member_id || !p.new_member_id) continue
+      if (p.old_member_id === p.new_member_id) continue
+      alias.set(p.old_member_id, p.new_member_id)
     } else if (e.type === 'comment.created' || e.type === 'comment.updated') {
       const p = e.payload
       if (!p || !p.comment_id || !p.expense_id) continue
@@ -107,6 +145,52 @@ export function computeState(events) {
     }
   }
 
+  const resolve = resolver(alias)
+  // Everyone a merge pointed away from stops being a separate person.
+  const mergedAway = new Set(
+    [...alias.keys()].filter((id) => resolve(id) !== id)
+  )
+  const liveMembers = members.filter((m) => !mergedAway.has(m.id))
+  const liveMemberIds = liveMembers.map((m) => m.id)
+
+  // The recipe is display and re-edit state, so its ids need resolving too —
+  // otherwise a merged-away person lingers as a ghost in the receipt editor.
+  const resolveRecipe = (split) => {
+    if (!split) return null
+    const out = { ...split }
+    if (Array.isArray(split.participants)) {
+      out.participants = [...new Set(split.participants.map(resolve))]
+    }
+    if (Array.isArray(split.items)) {
+      out.items = split.items.map((it) => ({
+        ...it,
+        claimed_by: [...new Set((it.claimed_by || []).map(resolve))],
+      }))
+    }
+    if (split.weights) {
+      const weights = {}
+      for (const [id, v] of Object.entries(split.weights)) {
+        const to = resolve(Number(id))
+        weights[to] = (weights[to] || 0) + v
+      }
+      out.weights = weights
+    }
+    return out
+  }
+
+  // Sum rather than overwrite: after a merge an expense can name both the old
+  // identity and the new one, and that person owes the total of the two.
+  const mergeRows = (rows, idKey, amountKey) => {
+    const totals = new Map()
+    for (const row of rows) {
+      const id = resolve(row[idKey])
+      totals.set(id, (totals.get(id) || 0) + row[amountKey])
+    }
+    return [...totals.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([id, amount]) => ({ [idKey]: id, [amountKey]: amount }))
+  }
+
   const expenses = Object.values(latest).map((e) => {
     const p = e.payload
     return {
@@ -114,12 +198,12 @@ export function computeState(events) {
       expense_id: p.expense_id,
       description: p.description,
       amount_cents: p.amount_cents,
-      payers: p.payers,
-      splits: p.splits,
+      payers: mergeRows(p.payers, 'user_id', 'paid_cents'),
+      splits: mergeRows(p.splits, 'user_id', 'share_cents'),
       // How the splits were derived (mode + inputs). Purely for re-editing and
       // display — balances only ever use the resolved `splits` above, so new
       // modes (percentage, shares, later a scanned receipt) never touch the fold.
-      split: p.split || null,
+      split: resolveRecipe(p.split),
       date: p.date || '',
       category: p.category || '',
       // Ids of receipt images, never the images themselves — the log is
@@ -131,11 +215,13 @@ export function computeState(events) {
     }
   })
 
-  const nameById = Object.fromEntries(members.map((m) => [m.id, m.display_name]))
+  const nameById = Object.fromEntries(
+    liveMembers.map((m) => [m.id, m.display_name])
+  )
 
   const paid = {}
   const owed = {}
-  for (const uid of memberIds) {
+  for (const uid of liveMemberIds) {
     paid[uid] = 0
     owed[uid] = 0
   }
@@ -152,8 +238,10 @@ export function computeState(events) {
   const settlements = Object.values(settle).map((ev) => ({
     id: ev.id,
     settlement_id: ev.payload.settlement_id,
-    from: ev.payload.from,
-    to: ev.payload.to,
+    // Both ends resolved: a payment made by an account someone has since lost
+    // is still a payment they made.
+    from: resolve(ev.payload.from),
+    to: resolve(ev.payload.to),
     amount_cents: ev.payload.amount_cents,
     date: ev.payload.date || '',
     deleted: !!ev.payload.deleted,
@@ -167,7 +255,7 @@ export function computeState(events) {
 
   const byDateDesc = (a, b) =>
     a.date === b.date ? b.id - a.id : a.date < b.date ? 1 : -1
-  const balances = members.map((m) => ({
+  const balances = liveMembers.map((m) => ({
     user_id: m.id,
     display_name: m.display_name,
     net_cents: paid[m.id] - owed[m.id],
@@ -181,8 +269,9 @@ export function computeState(events) {
       comment_id: c.ev.payload.comment_id,
       expense_id: eid,
       text: c.ev.payload.text,
-      author: c.author,
-      author_name: nameById[c.author] || '?',
+      // Resolved so that after a merge you can still edit what you wrote.
+      author: resolve(c.author),
+      author_name: nameById[resolve(c.author)] || '?',
       created_id: c.createdId,
     })
   }
@@ -207,7 +296,7 @@ export function computeState(events) {
     }))
     .sort(byDateDesc)
 
-  return { members, balances, ledger, payments }
+  return { members: liveMembers, balances, ledger, payments }
 }
 
 // Deterministic greedy min-cash-flow: repeatedly match the biggest debtor with

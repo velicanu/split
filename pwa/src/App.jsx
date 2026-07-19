@@ -572,6 +572,75 @@ function ReceiptThumb({ groupId, receiptId }) {
   )
 }
 
+// Recovering an account, from the group's side. Deliberately plain and a
+// little grudging: it is an identity-level claim, and while any member can
+// already edit any expense, this one is easier to miss after the fact.
+function MergeMembers({ members, onMerge }) {
+  const [open, setOpen] = useState(false)
+  const [oldId, setOldId] = useState('')
+  const [newId, setNewId] = useState('')
+  const [error, setError] = useState('')
+
+  async function submit(e) {
+    e.preventDefault()
+    setError('')
+    const from = Number(oldId)
+    const to = Number(newId)
+    if (!from || !to) return setError('Pick both people')
+    if (from === to) return setError('Those are the same person')
+    try {
+      await onMerge(from, to)
+      setOpen(false)
+      setOldId('')
+      setNewId('')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  if (members.length < 2) return null
+  if (!open) {
+    return (
+      <button className="link" onClick={() => setOpen(true)}>
+        someone lost their account?
+      </button>
+    )
+  }
+
+  const pick = (value, set, label) => (
+    <label className="field">
+      {label}
+      <select value={value} onChange={(e) => set(e.target.value)}>
+        <option value="">choose…</option>
+        {members.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.display_name}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+
+  return (
+    <form onSubmit={submit}>
+      <h4>Same person, new account</h4>
+      <p className="muted">
+        Their old history moves to the new account and the old one disappears
+        from this group. Everyone sees it, and it cannot be undone.
+      </p>
+      {pick(oldId, setOldId, 'the account they lost')}
+      {pick(newId, setNewId, 'the account they use now')}
+      <div className="row-actions">
+        <button type="submit">Merge them</button>
+        <button type="button" className="link" onClick={() => setOpen(false)}>
+          cancel
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+    </form>
+  )
+}
+
 function GroupList({ onOpen }) {
   const [groups, setGroups] = useState(null)
   const [name, setName] = useState('')
@@ -803,6 +872,16 @@ export function GroupView({ groupId, me, ai, onBack }) {
       throw err
     }
   }
+  // Someone who lost every device signs up again and gets re-invited; this
+  // reattaches their history to the account they can actually sign for. See
+  // plan/07 — the group vouches for them, because the server cannot.
+  const mergeMembers = (old_member_id, new_member_id) =>
+    appendEvent('member.merged', {
+      old_member_id,
+      new_member_id,
+      updated_at: Date.now(),
+    }).then(pull)
+
   const recordSettlement = (from, to, amount_cents) =>
     appendSettlement(
       {
@@ -905,6 +984,8 @@ export function GroupView({ groupId, me, ai, onBack }) {
 
       <h3>Settle up</h3>
       <SettleUp suggestions={suggestions} onRecord={recordSettlement} />
+
+      <MergeMembers members={state.members} onMerge={mergeMembers} />
 
       {state.members.length > 0 && (
         <ExpenseForm
