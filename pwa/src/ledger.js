@@ -15,6 +15,31 @@ export function splitEqually(amountCents, memberIds) {
   return shares
 }
 
+// Split proportionally to weights — percentages, shares, and later a receipt's
+// per-person subtotals all resolve through here. Leftover cents go by largest
+// fractional remainder with a user_id tiebreak, so it's deterministic and the
+// shares always sum to the total. Weights: { user_id: positive number }.
+export function splitByWeights(amountCents, weights) {
+  const ids = Object.keys(weights).map(Number).sort((a, b) => a - b)
+  const total = ids.reduce((t, id) => t + weights[id], 0)
+  if (!ids.length || total <= 0) return {}
+
+  const shares = {}
+  const fracs = []
+  let allocated = 0
+  for (const id of ids) {
+    const exact = (amountCents * weights[id]) / total
+    const base = Math.floor(exact)
+    shares[id] = base
+    allocated += base
+    fracs.push({ id, frac: exact - base })
+  }
+  fracs.sort((a, b) => b.frac - a.frac || a.id - b.id)
+  const remainder = amountCents - allocated
+  for (let i = 0; i < remainder; i += 1) shares[fracs[i].id] += 1
+  return shares
+}
+
 // Fold events (in ascending id / total order) into the displayable state.
 export function computeState(events) {
   const members = []
@@ -69,6 +94,10 @@ export function computeState(events) {
       amount_cents: p.amount_cents,
       payers: p.payers,
       splits: p.splits,
+      // How the splits were derived (mode + inputs). Purely for re-editing and
+      // display — balances only ever use the resolved `splits` above, so new
+      // modes (percentage, shares, later a scanned receipt) never touch the fold.
+      split: p.split || null,
       date: p.date || '',
       category: p.category || '',
       // Soft delete: the row stays in the log with its data intact so it can
