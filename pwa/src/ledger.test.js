@@ -786,6 +786,31 @@ describe('merging a member into their new account', () => {
     assert.equal(netOf(state, 4), -500)
   })
 
+  test('a cycle picks the same survivor whichever end is looked at first', () => {
+    // Nonsense data, but every client must still agree. Resolution order
+    // follows the order the merges arrive in, so the two orderings below would
+    // otherwise strand the balance under different members on different
+    // devices — the one failure this whole architecture exists to avoid.
+    const forwards = computeState([...base(), expense('e1'), merged(2, 3), merged(3, 2)])
+    const backwards = computeState([...base(), expense('e1'), merged(3, 2), merged(2, 3)])
+
+    assert.deepEqual(
+      forwards.members.map((m) => m.id),
+      backwards.members.map((m) => m.id),
+      'the same people survive regardless of arrival order'
+    )
+    assert.deepEqual(
+      forwards.balances.map((b) => [b.user_id, b.net_cents]),
+      backwards.balances.map((b) => [b.user_id, b.net_cents])
+    )
+    // Lowest id in the cycle, chosen precisely because it does not depend on
+    // traversal order.
+    assert.deepEqual(
+      forwards.members.map((m) => m.id),
+      [1, 2]
+    )
+  })
+
   test('a cycle is survived rather than hung on', () => {
     // Nonsense data, but it must not spin forever.
     const state = computeState([...base(), expense('e1'), merged(2, 3), merged(3, 2)])
