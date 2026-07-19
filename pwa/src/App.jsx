@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { computeState, simplify, splitEqually } from './ledger'
+import { computeState, simplify, splitByWeights, splitEqually } from './ledger'
 
 async function api(path, body) {
   const res = await fetch(`/api/${path}`, {
@@ -539,6 +539,9 @@ function ExpenseDetail({ expense, members, meId, onClose, onPost, onEdit, onDele
           {money(expense.amount_cents)}
           {expense.date ? ` · ${expense.date}` : ''}
           {expense.category ? ` · ${expense.category}` : ''}
+          {expense.split?.mode && expense.split.mode !== 'equal'
+            ? ` · by ${expense.split.mode}`
+            : ''}
         </p>
 
         <h4>Paid</h4>
@@ -806,6 +809,16 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
   )
   const [date, setDate] = useState(initial?.date || today)
   const [category, setCategory] = useState(initial?.category ?? '')
+  // How to split: equally (default), by percentage, or by shares.
+  const [mode, setMode] = useState(initial?.split?.mode || 'equal')
+  // Per-member percentage/share inputs, keyed by user id (strings while typing).
+  const [weights, setWeights] = useState(() =>
+    initial?.split?.weights
+      ? Object.fromEntries(
+          Object.entries(initial.split.weights).map(([id, v]) => [id, String(v)])
+        )
+      : {}
+  )
   // members left OUT of the split (so members who join later default to "in")
   const [excluded, setExcluded] = useState(() => {
     if (!initial) return []
@@ -836,17 +849,50 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
     }
     if (!date) return setError('Pick a date')
 
-    const participants = members
-      .map((m) => m.id)
-      .filter((id) => !excluded.includes(id))
-    if (!participants.length) {
-      return setError('Pick at least one person to split between')
+    // Resolve the chosen mode down to frozen per-person cents. Whatever the
+    // mode, the stored `splits` are what balances use; `split` keeps the recipe.
+    let splits
+    let split
+    if (mode === 'equal') {
+      const participants = members
+        .map((m) => m.id)
+        .filter((id) => !excluded.includes(id))
+      if (!participants.length) {
+        return setError('Pick at least one person to split between')
+      }
+      const shares = splitEqually(cents, participants)
+      splits = participants.map((uid) => ({
+        user_id: uid,
+        share_cents: shares[uid],
+      }))
+      split = { mode: 'equal' }
+    } else {
+      const w = {}
+      for (const m of members) {
+        const v = parseFloat(weights[m.id])
+        if (v > 0) w[m.id] = v
+      }
+      const ids = Object.keys(w)
+      if (!ids.length) {
+        return setError(
+          mode === 'percentage'
+            ? 'Enter a percentage for at least one person'
+            : 'Enter shares for at least one person'
+        )
+      }
+      if (mode === 'percentage') {
+        const sum = ids.reduce((t, id) => t + w[id], 0)
+        if (Math.abs(sum - 100) > 0.001) {
+          return setError(`Percentages must total 100 (now ${sum})`)
+        }
+      }
+      const shares = splitByWeights(cents, w)
+      splits = Object.keys(shares)
+        .map(Number)
+        .sort((a, b) => a - b)
+        .map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
+      split = { mode, weights: w }
     }
-    const shares = splitEqually(cents, participants)
-    const splits = participants.map((uid) => ({
-      user_id: uid,
-      share_cents: shares[uid],
-    }))
 
     if (!payerIds.length) return setError('Pick who paid')
     let payers
@@ -876,6 +922,7 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
           amount_cents: cents,
           payers,
           splits,
+          split,
           date,
           category: category.trim(),
           deleted: initial?.deleted ?? false,
@@ -940,19 +987,50 @@ function ExpenseForm({ members, me, initial, onSubmit, onCancel }) {
         })}
       </fieldset>
 
-      <fieldset className="participants">
-        <legend>split between</legend>
-        {members.map((m) => (
-          <label key={m.id} className="check">
-            <input
-              type="checkbox"
-              checked={!excluded.includes(m.id)}
-              onChange={() => toggle(excluded, setExcluded, m.id)}
-            />
-            {m.username}
-          </label>
-        ))}
-      </fieldset>
+      <label className="field">
+        split
+        <select value={mode} onChange={(e) => setMode(e.target.value)}>
+          <option value="equal">equally</option>
+          <option value="percentage">by percentage</option>
+          <option value="shares">by shares</option>
+        </select>
+      </label>
+
+      {mode === 'equal' ? (
+        <fieldset className="participants">
+          <legend>split between</legend>
+          {members.map((m) => (
+            <label key={m.id} className="check">
+              <input
+                type="checkbox"
+                checked={!excluded.includes(m.id)}
+                onChange={() => toggle(excluded, setExcluded, m.id)}
+              />
+              {m.username}
+            </label>
+          ))}
+        </fieldset>
+      ) : (
+        <fieldset className="participants">
+          <legend>
+            {mode === 'percentage' ? 'percentages (total 100)' : 'shares'}
+          </legend>
+          {members.map((m) => (
+            <label key={m.id} className="check">
+              {m.username}
+              <input
+                className="pay-amt"
+                inputMode="decimal"
+                placeholder={mode === 'percentage' ? '%' : '0'}
+                value={weights[m.id] ?? ''}
+                onChange={(e) =>
+                  setWeights((w) => ({ ...w, [m.id]: e.target.value }))
+                }
+              />
+            </label>
+          ))}
+        </fieldset>
+      )}
 
       <div className="row-actions">
         <button type="submit">{initial ? 'Save changes' : 'Add expense'}</button>
