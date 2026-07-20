@@ -119,6 +119,13 @@ async function fakeApi({ seed = [] } = {}) {
       return json({ version, events: fresh })
     }
     if (path.includes('/events')) {
+      // The real server refuses this one, because the member list is its own
+      // routing state. The fake has to refuse it too: it once accepted every
+      // `member.*` event while the server rejected the lot of them, so the
+      // whole ghost path passed here and 400'd in production.
+      if (body.type === 'member.added') {
+        return fail(400, 'member.added is written by the server')
+      }
       // A revive writes into a brand-new group whose key this fake never sees
       // — it is minted on the client and sealed to the device. So those are
       // counted, not opened. What they *contain* is asserted in revive.test.js,
