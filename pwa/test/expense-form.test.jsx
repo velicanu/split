@@ -14,6 +14,7 @@ import {
   sealTo,
 } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
+import { forgetLocalLedger } from '../src/store.js'
 import { forgetReceipts } from '../src/receipts.js'
 import {
   $,
@@ -71,6 +72,7 @@ let stored
 async function serve({ subtotal = 3000, total = 3850, uploadFails = false } = {}) {
   uploaded = []
   forgetGroupKeys()
+  await forgetLocalLedger()
   forgetReceipts()
   const device = await generateDeviceKey()
   await saveDeviceKey(device)

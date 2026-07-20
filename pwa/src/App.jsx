@@ -21,6 +21,14 @@ import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
 import { planRevive } from './revive'
+import {
+  forgetLocalLedger,
+  localEvents,
+  meta as localMeta,
+  pendingCount,
+  setMeta as setLocalMeta,
+} from './store'
+import { append, flush, sync } from './sync'
 import { loadAiSettings, saveApiKey } from './aikeys'
 import { downloadJson, exportLedger, ledgerFilename } from './export'
 
@@ -942,57 +950,90 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
   const [locked, setLocked] = useState(false)
   const [unreadable, setUnreadable] = useState(0)
   const [showLog, setShowLog] = useState(false)
-  const versionRef = useRef(0)
+  // Whether the last sync reached the server, and how many of our own writes
+  // are still waiting to. Both are shown: an app that quietly holds writes is
+  // worse than one that says so.
+  const [online, setOnline] = useState(true)
+  const [pendingWrites, setPendingWrites] = useState(0)
+  // A sync started before this view closed must not keep writing to the store
+  // or to state afterwards. Switching groups quickly, or closing one mid-pull,
+  // otherwise lets a finished request land in a view that has moved on.
+  const alive = useRef(true)
 
-  // Pull only what's newer than what we already hold, decrypt it, then append.
-  const pull = useCallback(async () => {
-    try {
-      const res = await api(`groups/${groupId}/events?since=${versionRef.current}`)
-      if (!res.events.length) return
-      const key = await groupKey(groupId)
-      if (!key) {
-        setLocked(true)
-        return
-      }
-      setLocked(false)
-      const opened = []
-      let unreadable = 0
-      for (const e of res.events) {
-        // member.added is written by the server, which has no key, so it is
-        // the one event that is never encrypted.
-        if (!e.payload?.enc) {
-          opened.push(e)
-          continue
-        }
-        try {
-          opened.push({ ...e, payload: await decryptPayload(key, e.payload.enc) })
-        } catch {
-          // Skip rather than throw: one bad row must not blank the whole group.
-          unreadable += 1
-        }
-      }
-      setUnreadable((n) => n + unreadable)
-      versionRef.current = res.version
-      setVersion(res.version)
-      setEvents((prev) => [...prev, ...opened])
-    } catch (err) {
-      setError(err.message)
+  // Everything the UI shows comes from the local copy of the log. The network
+  // only ever adds to it, so the app works the same offline as on. plan/04.
+  const openLocal = useCallback(async () => {
+    const rows = await localEvents(groupId)
+    if (!rows.length || !alive.current) return
+    const key = await groupKey(groupId)
+    if (!key) {
+      setLocked(true)
+      return
     }
+    setLocked(false)
+    const opened = []
+    let bad = 0
+    for (const e of rows) {
+      // member.added is written by the server, which has no key, so it is the
+      // one event that is never encrypted.
+      if (!e.payload?.enc) {
+        opened.push(e)
+        continue
+      }
+      try {
+        opened.push({ ...e, payload: await decryptPayload(key, e.payload.enc) })
+      } catch {
+        // Skip rather than throw: one bad row must not blank the whole group.
+        bad += 1
+      }
+    }
+    setUnreadable(bad)
+    setEvents(opened)
+    setVersion((await localMeta(groupId)).cursor)
   }, [groupId])
 
+  // Push what we have written, pull what we have not seen, then re-read.
+  const refresh = useCallback(async () => {
+    const { online: reachable } = await sync(groupId, {
+      onRejected: (row, err) =>
+        setError(`A change could not be saved and was discarded: ${err.message}`),
+    })
+    if (!alive.current) return
+    setOnline(reachable)
+    await openLocal()
+    if (!alive.current) return
+    setPendingWrites(await pendingCount())
+  }, [groupId, openLocal])
+
   useEffect(() => {
-    versionRef.current = 0
+    alive.current = true
     setEvents([])
     setVersion(0)
     setEditing(null)
     setViewingId(null)
+    setUnreadable(0)
+    // Local first, and without waiting for anything: with no signal this is
+    // the whole of what the user sees, and with one it beats the round trip.
+    openLocal().then(refresh)
+    // Cached so the name is there offline too.
     api(`groups/${groupId}`)
-      .then(setMeta)
-      .catch((e) => setError(e.message))
-    pull()
-    const timer = setInterval(pull, 5000)
-    return () => clearInterval(timer)
-  }, [groupId, pull])
+      .then((m) => {
+        setMeta(m)
+        setLocalMeta(groupId, { name: m.name })
+      })
+      .catch(async () => {
+        const { name } = await localMeta(groupId)
+        if (name) setMeta({ id: groupId, name })
+      })
+    const timer = setInterval(refresh, 5000)
+    const onOnline = () => refresh()
+    window.addEventListener('online', onOnline)
+    return () => {
+      alive.current = false
+      clearInterval(timer)
+      window.removeEventListener('online', onOnline)
+    }
+  }, [groupId, openLocal, refresh])
 
   // Everything displayed is folded from the ledger, client-side.
   const state = useMemo(() => computeState(events), [events])
@@ -1009,13 +1050,16 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
     async (type, payload) => {
       const key = await groupKey(groupId)
       if (!key) throw new Error('No key for this group on this device')
-      // The returned id is the position in the log, which is what a ghosting
-      // freezes a member's view at.
-      return api(`groups/${groupId}/events`, {
+      // Stored here first, so the write is durable and on screen whether or
+      // not there is a network. The id comes back provisional and is replaced
+      // by the server's when it lands — which is why ghosting, which needs a
+      // real log position, flushes before reading it.
+      const row = await append(groupId, {
         event_id: crypto.randomUUID(),
         type,
         payload: { enc: await encryptPayload(key, payload) },
       })
+      return row
     },
     [groupId]
   )
@@ -1030,7 +1074,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
     // creating doesn't — so the draft, receipts and all, would otherwise sit
     // there after the expense was filed. Bump the key to get a clean form.
     setFormNonce((n) => n + 1)
-    await pull()
+    await refresh()
   }
 
   // Soft delete / restore is just another revision with the flag flipped.
@@ -1051,7 +1095,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
         deleted,
         updated_at: Date.now(),
       })
-      await pull()
+      await refresh()
     } catch (err) {
       setError(err.message)
     }
@@ -1065,7 +1109,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
         ...payload,
         updated_at: Date.now(),
       })
-      await pull()
+      await refresh()
     } catch (err) {
       setError(err.message)
       throw err
@@ -1075,20 +1119,31 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
   // included — leaving is ghosting yourself. It takes nothing away: the server
   // keeps serving them the group frozen at this event. See plan/12.
   async function ghostMember(member_id) {
-    const { id } = await appendEvent('member.left', {
+    // The one write that cannot be queued: the cut is a position in the server's
+    // log, and a provisional id is not one. So flush, and read back the id the
+    // server actually gave the event. Offline this throws, which is right —
+    // freezing someone's view is not something to do optimistically.
+    const row = await appendEvent('member.left', {
       member_id,
       updated_at: Date.now(),
     })
+    await flush(groupId)
+    const stored = (await localEvents(groupId)).find(
+      (e) => e.event_id === row.event_id
+    )
+    if (!stored || stored.pending) {
+      throw new Error('You need to be online to remove someone from a group')
+    }
     const res = await api(`groups/${groupId}/ghost`, {
       member_id,
-      at_event_id: id,
+      at_event_id: stored.id,
     })
     if (member_id === meId || res.deleted) {
       // Either I just left, or nobody is reading this group any more.
       onBack()
       return
     }
-    await pull()
+    await refresh()
   }
 
   // Clone what I can still see into a group of my own. The prefix I was served
@@ -1130,7 +1185,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
       display_name,
       updated_at: Date.now(),
     })
-    await pull()
+    await refresh()
     // Returned so an invite can name them: inviting someone is inviting them
     // to be this member.
     return member_id
@@ -1166,7 +1221,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
         ...payload,
         updated_at: Date.now(),
       })
-      await pull()
+      await refresh()
     } catch (err) {
       setError(err.message)
       throw err
@@ -1273,6 +1328,13 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
           members={state.members}
           onClose={() => setShowLog(false)}
         />
+      )}
+      {(!online || pendingWrites > 0) && (
+        <p className="muted sync-state">
+          {pendingWrites > 0
+            ? `${pendingWrites} change${pendingWrites === 1 ? '' : 's'} saved on this device, waiting to sync.`
+            : 'Offline — showing what this device already has.'}
+        </p>
       )}
       {unreadable > 0 && (
         <p className="error">

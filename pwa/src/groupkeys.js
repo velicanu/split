@@ -13,6 +13,7 @@
 // See plan/11-identity-and-devices.md.
 
 import { api } from './api'
+import { localGroupKey, saveGroupKey } from './store'
 import {
   generateGroupKey,
   loadDeviceKey,
@@ -46,15 +47,33 @@ export async function publishGroupKey(groupId, groupKey, accountBoxPubkey) {
     ],
   })
   cache.set(groupId, groupKey)
+  await saveGroupKey(groupId, groupKey)
 }
 
-/** The key for a group, or null if this device has no copy it can open. */
+/** The key for a group, or null if this device has no copy it can open.
+ *
+ *  Checked in order of what still works with no network: memory, then this
+ *  device's own store, then the server. Without the local copy a group would
+ *  be unreadable offline — the events are here, but nothing could open them,
+ *  which is the same as having nothing. See plan/04. */
 export async function groupKey(groupId) {
   if (cache.has(groupId)) return cache.get(groupId)
 
+  const saved = await localGroupKey(groupId)
+  if (saved) {
+    cache.set(groupId, saved)
+    return saved
+  }
+
   const device = await loadDeviceKey()
   if (!device) return null
-  const { keys } = await api(`groups/${groupId}/keys`)
+  let keys
+  try {
+    ;({ keys } = await api(`groups/${groupId}/keys`))
+  } catch {
+    // Offline, and nothing stored here yet.
+    return null
+  }
   const mine = keys.find((k) => k.recipient_kind === 'device')
   if (!mine) return null
   try {
@@ -64,6 +83,7 @@ export async function groupKey(groupId) {
       mine.ciphertext
     )
     cache.set(groupId, key)
+    await saveGroupKey(groupId, key)
     return key
   } catch {
     // Sealed to a device key this browser no longer holds.
@@ -74,6 +94,7 @@ export async function groupKey(groupId) {
 export async function createGroupKey(groupId) {
   const key = await generateGroupKey()
   await publishGroupKey(groupId, key)
+  await saveGroupKey(groupId, key)
   return key
 }
 
