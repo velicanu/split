@@ -680,6 +680,73 @@ async function acceptInvite(invite) {
   return g
 }
 
+// Leaving, and tidying away someone who has stopped using the app. The same
+// act either way: they become a ghost, their balances untouched.
+function LeaveOrGhost({ members, meId, onGhost }) {
+  const [confirming, setConfirming] = useState(null)
+  const [error, setError] = useState('')
+
+  const others = members.filter((m) => !m.ghost && m.id !== meId)
+
+  async function go(id) {
+    setError('')
+    try {
+      await onGhost(id)
+    } catch (err) {
+      setError(err.message)
+      setConfirming(null)
+    }
+  }
+
+  if (confirming) {
+    const mine = confirming.id === meId
+    return (
+      <section>
+        <p className="error">
+          {mine
+            ? 'Leave this group? You keep it exactly as it stands now, but you won’t see anything the group does after this.'
+            : `Make ${confirming.display_name} a ghost? They keep everything up to now, and stop seeing the group after this. Their balances don’t change.`}
+        </p>
+        <div className="row-actions">
+          <button onClick={() => go(confirming.id)}>
+            {mine ? 'Leave' : `Yes, ghost ${confirming.display_name}`}
+          </button>
+          <button className="link" onClick={() => setConfirming(null)}>
+            cancel
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  return (
+    <section>
+      <div className="row-actions">
+        {meId !== null && (
+          <button
+            className="link danger"
+            onClick={() =>
+              setConfirming(members.find((m) => m.id === meId) ?? { id: meId })
+            }
+          >
+            leave this group
+          </button>
+        )}
+        {others.map((m) => (
+          <button
+            key={m.id}
+            className="link"
+            onClick={() => setConfirming(m)}
+          >
+            ghost {m.display_name}
+          </button>
+        ))}
+      </div>
+      {error && <p className="error">{error}</p>}
+    </section>
+  )
+}
+
 // A person in the split who isn't in the app. They pay, they owe, they settle
 // up — the ledger treats them exactly like anyone else.
 function AddGhost({ onAdd }) {
@@ -1021,7 +1088,9 @@ export function GroupView({ groupId, me, ai, onBack }) {
     async (type, payload) => {
       const key = await groupKey(groupId)
       if (!key) throw new Error('No key for this group on this device')
-      await api(`groups/${groupId}/events`, {
+      // The returned id is the position in the log, which is what a ghosting
+      // freezes a member's view at.
+      return api(`groups/${groupId}/events`, {
         event_id: crypto.randomUUID(),
         type,
         payload: { enc: await encryptPayload(key, payload) },
@@ -1084,6 +1153,26 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // Someone who lost every device signs up again and gets re-invited; this
   // reattaches their history to the account they can actually sign for. See
   // plan/07 — the group vouches for them, because the server cannot.
+  // Turn a member into a ghost. Anyone may do this to anyone, themselves
+  // included — leaving is ghosting yourself. It takes nothing away: the server
+  // keeps serving them the group frozen at this event. See plan/12.
+  async function ghostMember(member_id) {
+    const { id } = await appendEvent('member.left', {
+      member_id,
+      updated_at: Date.now(),
+    })
+    const res = await api(`groups/${groupId}/ghost`, {
+      member_id,
+      at_event_id: id,
+    })
+    if (member_id === meId || res.deleted) {
+      // Either I just left, or nobody is reading this group any more.
+      onBack()
+      return
+    }
+    await pull()
+  }
+
   // Someone who splits expenses with the group but doesn't use the app.
   // Negative ids so they can never collide with a server-issued user id, and
   // still numbers so the split maths keeps working. See plan/12.
@@ -1161,6 +1250,31 @@ export function GroupView({ groupId, me, ai, onBack }) {
 
   if (!meta) return null
 
+  // Merged away, or ghosted. Attributing new expenses to a stand-in would be
+  // worse than refusing.
+  if (state.members.length > 0 && meId === null) {
+    return (
+      <section>
+        <button className="link" onClick={onBack}>
+          ← groups
+        </button>
+        <h2>{meta.name}</h2>
+        <p className="muted">
+          You&rsquo;re no longer part of this group. What you can see here is
+          how it stood when you left; it won&rsquo;t change again.
+        </p>
+        <LedgerLog
+          group={{ id: groupId, name: meta.name }}
+          version={version}
+          events={events}
+          unreadable={unreadable}
+          members={state.members}
+          onClose={onBack}
+        />
+      </section>
+    )
+  }
+
   if (locked) {
     return (
       <section>
@@ -1231,6 +1345,7 @@ export function GroupView({ groupId, me, ai, onBack }) {
       <SettleUp suggestions={suggestions} onRecord={recordSettlement} />
 
       <AddGhost onAdd={addGhost} />
+      <LeaveOrGhost members={state.members} meId={meId} onGhost={ghostMember} />
       <MergeMembers members={state.members} onMerge={mergeMembers} />
 
       {state.members.length > 0 && (
@@ -1558,8 +1673,12 @@ function ExpenseDetail({
 function memberIdFor(members, me) {
   // By id: display names are not unique, so matching on one could silently
   // attribute an expense to the wrong person.
-  const mine = members.find((m) => m.id === me?.id)
-  return (mine || members[0])?.id
+  //
+  // Returns nothing when you are not among them. Falling back to members[0] —
+  // as this used to — meant that anyone whose member id had been merged away
+  // or ghosted silently became whoever happened to be listed first, and their
+  // next expense would be attributed to that person.
+  return members.find((m) => m.id === me?.id)?.id ?? null
 }
 
 // Line items with per-person claims. Claim an item and it splits between its

@@ -690,3 +690,60 @@ describe('inviting someone', () => {
     assert.equal($('.invite'), null)
   })
 })
+
+describe('when you are no longer part of the group', () => {
+  test('says so rather than treating you as someone else', async () => {
+    // Member 1 has been merged into member 2, so `me` is no longer in the
+    // member list. Falling back to the first member — as this used to — meant
+    // silently becoming them, and the next expense you added would be
+    // attributed to them.
+    await fakeApi({
+      seed: [
+        {
+          id: 3,
+          type: 'member.merged',
+          author: 2,
+          payload: { old_member_id: 1, new_member_id: 2 },
+        },
+      ],
+    })
+    await open()
+
+    assert.ok(text().includes('no longer part of this group'))
+    // And crucially, no way to write anything as somebody else.
+    assert.equal(byText('h3', 'Add an expense'), undefined)
+    assert.equal($('.scan'), null)
+  })
+
+  test('still shows the ledger as it stood', async () => {
+    // The merge comes first: a claimer must have no activity, so an expense
+    // naming member 2 beforehand would (correctly) get the merge rejected.
+    await fakeApi({
+      seed: [
+        {
+          id: 3,
+          type: 'member.merged',
+          author: 2,
+          payload: { old_member_id: 1, new_member_id: 2 },
+        },
+        {
+          id: 4,
+          type: 'expense.created',
+          author: 2,
+          payload: {
+            expense_id: 'e1',
+            description: 'Dinner',
+            amount_cents: 1000,
+            payers: [{ user_id: 2, paid_cents: 1000 }],
+            splits: [{ user_id: 2, share_cents: 1000 }],
+            date: '2026-01-01',
+          },
+        },
+      ],
+    })
+    await open()
+    // What you had is still yours to read.
+    assert.ok(text().includes('Ledger'))
+    assert.ok(text().includes('expense.created'))
+  })
+})

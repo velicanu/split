@@ -1108,3 +1108,76 @@ describe('a member can only be claimed once', () => {
     )
   })
 })
+
+describe('ghosting a member', () => {
+  const left = (member_id, author) => ev('member.left', { member_id }, author)
+
+  test('their balances are untouched — they just stop being an app user', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      left(2, 1),
+    ])
+    assert.equal(netOf(state, 2), -500, 'still owes exactly what they owed')
+    assert.equal(netOf(state, 1), 500)
+    assert.equal(state.members.length, 2, 'still in the split')
+    assert.equal(state.balances.find((b) => b.user_id === 2).ghost, true)
+  })
+
+  test('anyone may ghost anyone, including someone who did not ask', () => {
+    // Deliberate: it takes nothing away, since the server keeps serving them
+    // the group frozen at this point. See plan/12.
+    const state = computeState([member(1, 'v'), member(2, 'd'), left(2, 1)])
+    assert.equal(state.balances.find((b) => b.user_id === 2).ghost, true)
+  })
+
+  test('leaving is ghosting yourself', () => {
+    const state = computeState([member(1, 'v'), member(2, 'd'), left(2, 2)])
+    assert.equal(state.balances.find((b) => b.user_id === 2).ghost, true)
+  })
+
+  test('a ghosted member can still be settled up with', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      left(2, 1),
+      ev('settlement.created', {
+        settlement_id: 's1',
+        from: 2,
+        to: 1,
+        amount_cents: 500,
+        date: '2026-01-02',
+      }),
+    ])
+    assert.equal(netOf(state, 2), 0)
+    assert.equal(netOf(state, 1), 0)
+  })
+
+  test('a ghosted member can be claimed, which is how recovery works', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      left(2, 1),
+      member(3, 'd-again'),
+      ev('member.merged', { old_member_id: 2, new_member_id: 3 }),
+    ])
+    assert.equal(netOf(state, 3), -500, 'the debt followed them to the new account')
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 3]
+    )
+  })
+
+  test('a malformed leave is ignored', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      ev('member.left', null, 1),
+      ev('member.left', { member_id: 'nope' }, 1),
+    ])
+    assert.equal(state.balances.every((b) => !b.ghost), true)
+  })
+})

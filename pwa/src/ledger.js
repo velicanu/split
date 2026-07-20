@@ -99,6 +99,9 @@ export function computeState(events) {
   // means starting a new account; this is what reattaches their history to
   // them instead of stranding it under an identity nobody can sign for.
   const alias = new Map()
+  // Members who have been turned into ghosts. They keep their history and
+  // their balances; they simply have nobody attached any more.
+  const ghosted = new Set()
   // expense_id -> its latest event. An edit is just a new expense.updated row
   // with the same expense_id; the latest one wins (append order is the total
   // order). Both payers and splits are frozen per revision.
@@ -156,6 +159,14 @@ export function computeState(events) {
       active.add(p.to)
       const prev = settle[p.settlement_id]
       if (!prev || e.id > prev.id) settle[p.settlement_id] = e
+    } else if (e.type === 'member.left') {
+      // Anyone may ghost anyone, including themselves — leaving is ghosting
+      // yourself. What stops this being a hostile act is that it takes nothing
+      // away: the server keeps serving the ghosted member the group frozen at
+      // this event, so they retain everything they already had. See plan/12.
+      const p = e.payload
+      if (!p || typeof p.member_id !== 'number') continue
+      ghosted.add(p.member_id)
     } else if (e.type === 'member.merged') {
       const p = e.payload
       if (!p || !p.old_member_id || !p.new_member_id) continue
@@ -182,7 +193,10 @@ export function computeState(events) {
   const mergedAway = new Set(
     [...alias.keys()].filter((id) => resolve(id) !== id)
   )
-  const liveMembers = members.filter((m) => !mergedAway.has(m.id))
+  const liveMembers = members
+    .filter((m) => !mergedAway.has(m.id))
+    // A ghosted member is still a member of the split, just not of the app.
+    .map((m) => (ghosted.has(m.id) ? { ...m, ghost: true } : m))
   const liveMemberIds = liveMembers.map((m) => m.id)
 
   // The recipe is display and re-edit state, so its ids need resolving too —

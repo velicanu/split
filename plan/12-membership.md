@@ -26,28 +26,51 @@ the client. Two reasons:
   about who gets the spare cent — the one failure the whole design exists to
   prevent.
 
-## Leaving
+## Leaving, and ghosting someone else
 
-Anyone may leave a group. Nobody can be removed by anyone else.
+**Anyone may ghost anyone, themselves included.** Leaving is ghosting yourself.
 
-Leaving turns you into a ghost: **your balances do not change**, your history
-stays exactly as it was, and the group carries on splitting with you as a name.
-What ends is your access — the server drops your membership, so you stop
-receiving the group, and the client drops what it holds.
+Ghosting turns a member into a ghost: **their balances do not change**, their
+history stays exactly as it was, and the group carries on splitting with them as
+a name.
 
-This is tidiness, not a privacy boundary. A departed member keeps the group key
-(we do not rotate) and may have exported the ledger, so leaving must never be
+The reason this is not a hostile act is that it **takes nothing away**. The
+server keeps serving a ghosted member the group, capped at the event that
+ghosted them — `memberships.until_event_id`. They keep everything they already
+had; they simply stop receiving what comes after.
+
+That cap is what makes the whole thing sound. The cut is **a position in the
+log, not a moment in time**, so it does not matter whether the ghosted member
+syncs a second later or a year later: they see exactly the prefix, and always
+the same prefix. There is nothing to race.
+
+From their side the group is frozen: everyone in it is, in effect, a ghost —
+names that will never do anything again. If they are ever invited back it looks
+like joining a new group that happens to share a starting ledger.
+
+A ghosted member may **read but not write**. Otherwise they could keep appending
+events the group sees and they never will — a one-way conversation into a ledger
+they have left.
+
+This is tidiness, not a privacy boundary. A ghosted member keeps the group key
+(we do not rotate) and may have exported the ledger, so it must never be
 described as shutting someone out.
 
-`member.left` is **self-authored**: payloads are encrypted, so the server cannot
-check the claim, but it does set `author` on every event and that cannot be
-forged. The fold therefore accepts a `member.left` only when
-`author === member_id`, which is what makes "cannot be kicked" true rather than
-merely intended.
+When nobody is left reading a group, it is genuinely gone: the server deletes the
+group, its events, its receipts and its wrapped keys. Membership reaching zero is
+one of the few rules the server can enforce without reading anything.
 
-When the last member leaves, the group is genuinely gone: the server deletes the
-group, its events, its receipts and its wrapped keys. Membership count reaching
-zero is one of the few rules the server can enforce without reading anything.
+### Why not "only you may leave"
+
+Account recovery needs someone *else* to act: a person who has lost their account
+cannot ghost themselves. Requiring self-authorship would leave the one case the
+whole ghost mechanism exists for unreachable.
+
+The alternative considered — inviting someone to take over a member id that is
+still active — is worse. It reattributes a live member's history while they are
+still connected, so their next sync silently makes them somebody else. Ghosting
+first severs the feed at a clean point, which is exactly why the fork is
+comprehensible.
 
 ## Invites name a member
 
@@ -100,7 +123,7 @@ Two honest limits:
 
 ```
 member.ghost_added { member_id, display_name }   any member may add
-member.left        { member_id }                 accepted only if author matches
+member.left        { member_id }                 any member may ghost any member
 member.merged      { old_member_id, new_member_id }   claimer must be unused
 ```
 
@@ -114,5 +137,5 @@ the server writes it, so it stays in the clear.
   first.
 - **Group key rotation on leave.** Consistent with member removal generally, and
   the reason leaving is presented as tidying rather than security.
-- **Any form of removal by others.** A group is a set of people who each chose to
-  be there.
+- **Restricting who may ghost whom.** Account recovery requires a third party to
+  act on behalf of someone who cannot act at all.

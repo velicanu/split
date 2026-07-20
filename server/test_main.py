@@ -524,3 +524,135 @@ def test_ai_provider_validation():
     other = signed_up("aiuser3")
     put_key(u, "anthropic", seal("mine"))
     assert other.get("/api/ai/settings").json()["providers"] == {}
+
+
+def ghost(client, gid, member_id, at_event_id):
+    return client.post(
+        f"/api/groups/{gid}/ghost",
+        json={"member_id": member_id, "at_event_id": at_event_id},
+    )
+
+
+def test_a_ghosted_member_keeps_the_group_frozen_at_that_point():
+    """The cut is a position in the log, not a moment in time — so it does not
+    matter whether they sync a second later or a year later."""
+    owner = signed_up("ghost-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    other = signed_up("ghost-other")
+    other.post("/api/groups/join", json={"code": group["code"]})
+    other_id = other.get("/api/me").json()["id"]
+
+    owner.post(
+        f"/api/groups/{gid}/events",
+        json={"event_id": "before", "type": "expense.created", "payload": {"enc": "a"}},
+    )
+    cut = events_of(owner, gid)["version"]
+
+    assert ghost(owner, gid, other_id, cut).json() == {"ok": True, "deleted": False}
+
+    owner.post(
+        f"/api/groups/{gid}/events",
+        json={"event_id": "after", "type": "expense.created", "payload": {"enc": "b"}},
+    )
+
+    # The group carries on for the owner...
+    assert events_of(owner, gid)["version"] > cut
+    assert {e["event_id"] for e in events_of(owner, gid)["events"]} >= {
+        "before",
+        "after",
+    }
+
+    # ...and is frozen for the ghosted member, however long they wait.
+    frozen = events_of(other, gid)
+    assert frozen["version"] == cut
+    ids = {e["event_id"] for e in frozen["events"]}
+    assert "before" in ids
+    assert "after" not in ids, "nothing after the cut, ever"
+    assert events_of(other, gid)["version"] == cut, "and it stays that way"
+
+
+def test_a_ghosted_member_can_read_but_not_write():
+    owner = signed_up("gw-owner")
+    group = owner.post("/api/groups", json={"name": "W"}).json()
+    gid = group["id"]
+    other = signed_up("gw-other")
+    other.post("/api/groups/join", json={"code": group["code"]})
+    other_id = other.get("/api/me").json()["id"]
+    ghost(owner, gid, other_id, events_of(owner, gid)["version"])
+
+    # Reading their frozen copy still works.
+    assert other.get(f"/api/groups/{gid}/events").status_code == 200
+    assert other.get(f"/api/groups/{gid}").status_code == 200
+
+    # Writing does not: a one-way conversation into a ledger they have left.
+    assert (
+        other.post(
+            f"/api/groups/{gid}/events",
+            json={"event_id": "x", "type": "expense.created", "payload": {"enc": "c"}},
+        ).status_code
+        == 403
+    )
+    ciphertext, rid = sealed(b"after leaving")
+    assert (
+        other.post(
+            f"/api/groups/{gid}/receipts",
+            json={"receipt_id": rid, "ciphertext": ciphertext},
+        ).status_code
+        == 403
+    )
+
+
+def test_ghosting_the_last_member_deletes_the_group():
+    import sqlite3
+
+    owner = signed_up("last-one")
+    group = owner.post("/api/groups", json={"name": "Solo"}).json()
+    gid = group["id"]
+    owner.post(
+        f"/api/groups/{gid}/events",
+        json={"event_id": "solo-1", "type": "expense.created", "payload": {"enc": "a"}},
+    )
+    ciphertext, rid = sealed(b"solo receipt")
+    owner.post(
+        f"/api/groups/{gid}/receipts",
+        json={"receipt_id": rid, "ciphertext": ciphertext},
+    )
+
+    res = ghost(owner, gid, owner.get("/api/me").json()["id"], 999)
+    assert res.json() == {"ok": True, "deleted": True}
+
+    # Truly gone, not merely hidden.
+    conn = sqlite3.connect(DB_PATH)
+    for table in ("events", "receipts", "group_keys", "memberships"):
+        left = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE group_id = ?", (gid,)
+        ).fetchone()[0]
+        assert left == 0, table
+    assert (
+        conn.execute("SELECT COUNT(*) FROM groups WHERE id = ?", (gid,)).fetchone()[0]
+        == 0
+    )
+    assert owner.get(f"/api/groups/{gid}").status_code == 404
+
+
+def test_ghosting_needs_membership_and_is_not_undone_by_repeating_it():
+    owner = signed_up("gm-owner")
+    group = owner.post("/api/groups", json={"name": "M"}).json()
+    gid = group["id"]
+    other = signed_up("gm-other")
+    other.post("/api/groups/join", json={"code": group["code"]})
+    other_id = other.get("/api/me").json()["id"]
+
+    stranger = signed_up("gm-stranger")
+    assert ghost(stranger, gid, other_id, 1).status_code == 404
+
+    cut = events_of(owner, gid)["version"]
+    ghost(owner, gid, other_id, cut)
+    owner.post(
+        f"/api/groups/{gid}/events",
+        json={"event_id": "later", "type": "expense.created", "payload": {"enc": "z"}},
+    )
+    # Ghosting again must not move the cut forward and hand them more.
+    ghost(owner, gid, other_id, events_of(owner, gid)["version"])
+    assert events_of(other, gid)["version"] == cut
