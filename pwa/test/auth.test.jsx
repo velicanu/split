@@ -17,7 +17,9 @@ import {
 import { append } from '../src/sync.js'
 import {
   forgetDeviceKey,
+  forgetSession,
   loadDeviceKey,
+  loadSession,
   saveDeviceKey,
   unwrapAccountKey,
   wrapAccountKey,
@@ -35,6 +37,9 @@ function fakeServer() {
     // group id -> [{recipient_kind, recipient_id, ciphertext}]
     groupKeys: {},
     groups: [],
+    // Flip on to simulate no signal: fetch rejects, as it does in a browser
+    // that cannot reach the server, rather than returning an HTTP error.
+    offline: false,
   }
   const json = (body) => ({ ok: true, json: async () => body })
   const fail = (status, detail) => ({
@@ -44,6 +49,7 @@ function fakeServer() {
   })
 
   globalThis.fetch = async (url, options) => {
+    if (state.offline) throw new TypeError('Failed to fetch')
     const path = String(url).replace('/api/', '')
     const body = options?.body ? JSON.parse(options.body) : null
 
@@ -160,6 +166,7 @@ function fakeServer() {
 afterEach(async () => {
   localStorage.clear()
   await forgetDeviceKey()
+  await forgetSession()
   await forgetLocalLedger()
 })
 
@@ -230,6 +237,44 @@ describe('resuming on a device that already has a key', () => {
     )
   })
 
+  test('stays signed in offline, and keeps the key', async () => {
+    // The bug: an offline refresh went through the same path as a rejected
+    // key, so resume() returned null *and* deleted the device — signing you
+    // out with no way back but the password. Offline is not a rejection.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+
+    server.offline = true
+    const me = await resume()
+    assert.equal(me?.login_handle, 'v', 'still signed in, from the cached identity')
+    assert.ok(await loadDeviceKey(), 'and the key is untouched')
+  })
+
+  test('offline before ever reaching the server has nobody to be', async () => {
+    // A device key with no cached identity yet — nothing to open against, so
+    // fall through to the sign-in screen rather than a half-loaded session.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await forgetSession()
+
+    server.offline = true
+    assert.equal(await resume(), null)
+    assert.ok(await loadDeviceKey(), 'but the key still survives for next time')
+  })
+
+  test('a genuine rejection still drops the key', async () => {
+    // The distinction has to cut both ways: online and turned away is still a
+    // revoked device, and the dead key goes.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    const device = await loadDeviceKey()
+    delete server.devices[device.pubkey]
+
+    assert.equal(await resume(), null)
+    assert.equal(await loadDeviceKey(), null)
+    assert.equal(await loadSession(), null, 'and the cached identity with it')
+  })
+
   test('returns null on a device that has never enrolled', async () => {
     fakeServer()
     assert.equal(await resume(), null)
@@ -243,6 +288,20 @@ describe('signing out', () => {
   //
   // Logging out therefore un-enrols the browser. Getting back in needs the
   // password, the same as anywhere else.
+  test('works with no signal, clearing everything local anyway', async () => {
+    // Logging out cannot depend on reaching the server \u2014 on a shared computer
+    // that would leave the key and the ledger sitting there. The device row
+    // lingers server-side until revoked from elsewhere; the local state does
+    // not wait for that.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    server.offline = true
+
+    await logout() // must not throw
+    assert.equal(await loadDeviceKey(), null)
+    assert.equal(await loadSession(), null)
+  })
+
   test('forgets this device\u2019s key', async () => {
     fakeServer()
     await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
