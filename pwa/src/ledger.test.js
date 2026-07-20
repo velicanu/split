@@ -695,9 +695,11 @@ describe('merging a member into their new account', () => {
   })
 
   test('an expense naming both identities sums rather than overwrites', () => {
-    // Perfectly possible: an expense from before the loss and an edit after it.
+    // Happens when an old expense is edited after the merge: it still names
+    // the lost identity, and now names the new one too.
     const state = computeState([
       ...base(),
+      merged(2, 3),
       expense('e1', {
         amount_cents: 900,
         payers: [{ user_id: 1, paid_cents: 900 }],
@@ -707,7 +709,6 @@ describe('merging a member into their new account', () => {
           { user_id: 3, share_cents: 300 },
         ],
       }),
-      merged(2, 3),
     ])
     assert.equal(netOf(state, 3), -600, 'both shares land on the same person')
     assert.equal(netOf(state, 1), 600)
@@ -791,8 +792,12 @@ describe('merging a member into their new account', () => {
     // follows the order the merges arrive in, so the two orderings below would
     // otherwise strand the balance under different members on different
     // devices — the one failure this whole architecture exists to avoid.
-    const forwards = computeState([...base(), expense('e1'), merged(2, 3), merged(3, 2)])
-    const backwards = computeState([...base(), expense('e1'), merged(3, 2), merged(2, 3)])
+    // Members 3 and 4 have no activity, so both merges are admissible and a
+    // cycle can actually form.
+    const cycle = [member(4, 'd-third'), expense('e1'), merged(3, 4), merged(4, 3)]
+    const reversed = [member(4, 'd-third'), expense('e1'), merged(4, 3), merged(3, 4)]
+    const forwards = computeState([...base(), ...cycle])
+    const backwards = computeState([...base(), ...reversed])
 
     assert.deepEqual(
       forwards.members.map((m) => m.id),
@@ -807,7 +812,7 @@ describe('merging a member into their new account', () => {
     // traversal order.
     assert.deepEqual(
       forwards.members.map((m) => m.id),
-      [1, 2]
+      [1, 2, 3]
     )
   })
 
@@ -850,6 +855,203 @@ describe('merging a member into their new account', () => {
     assert.equal(
       state.balances.reduce((t, b) => t + b.net_cents, 0),
       0
+    )
+  })
+})
+
+describe('ghost members', () => {
+  // People splitting expenses with the group who don't use the app. Ledger-
+  // identical to members; the only thing they lack is an account. See plan/12.
+  const ghost = (member_id, display_name) =>
+    ev('member.ghost_added', { member_id, display_name })
+
+  test('count as members everywhere the money is concerned', () => {
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+    ])
+    assert.equal(netOf(state, -100), -500)
+    assert.equal(netOf(state, 1), 500)
+    assert.equal(
+      state.balances.reduce((t, b) => t + b.net_cents, 0),
+      0
+    )
+  })
+
+  test('can pay for things, not just owe', () => {
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: -100, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+    ])
+    assert.equal(netOf(state, -100), 500, 'a ghost can be owed money')
+    assert.equal(netOf(state, 1), -500)
+  })
+
+  test('are marked so the UI can tell them apart', () => {
+    const state = computeState([member(1, 'v'), ghost(-100, 'Fran')])
+    assert.deepEqual(
+      state.balances.map((b) => [b.display_name, b.ghost]),
+      [
+        ['v', false],
+        ['Fran', true],
+      ]
+    )
+  })
+
+  test('settle up alongside everyone else', () => {
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+      ev('settlement.created', {
+        settlement_id: 's1',
+        from: -100,
+        to: 1,
+        amount_cents: 500,
+        date: '2026-01-02',
+      }),
+    ])
+    assert.equal(netOf(state, -100), 0)
+    assert.equal(netOf(state, 1), 0)
+  })
+
+  test('a ghost with a name but no number is ignored', () => {
+    const state = computeState([
+      member(1, 'v'),
+      ev('member.ghost_added', { display_name: 'no id' }),
+      ev('member.ghost_added', null),
+      ev('member.ghost_added', { member_id: 'not-a-number', display_name: 'x' }),
+    ])
+    // A string id would make Number(id) NaN and break the remainder tiebreak,
+    // so the fold refuses it outright.
+    assert.equal(state.members.length, 1)
+  })
+
+  test('a repeated ghost id does not duplicate the member', () => {
+    const state = computeState([ghost(-100, 'Fran'), ghost(-100, 'Fran again')])
+    assert.equal(state.members.length, 1)
+    assert.equal(state.members[0].display_name, 'Fran')
+  })
+})
+
+describe('claiming a ghost', () => {
+  const ghost = (member_id, display_name) =>
+    ev('member.ghost_added', { member_id, display_name })
+  const merged = (old_member_id, new_member_id) =>
+    ev('member.merged', { old_member_id, new_member_id })
+
+  test('an unused member takes on the ghost’s history', () => {
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+      // Fran signs up and joins.
+      member(2, 'Fran'),
+      merged(-100, 2),
+    ])
+    assert.equal(netOf(state, 2), -500, 'the debt followed the person')
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 2]
+    )
+  })
+
+  test('a member who has already spent cannot claim one', () => {
+    // The attack: I owe 500, the ghost is owed 500, so claiming them would
+    // cancel my debt using someone else's credit.
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: -100, paid_cents: 1000 }],
+        splits: [
+          { user_id: 2, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+      merged(-100, 2),
+    ])
+    assert.equal(netOf(state, 2), -500, 'still owes it')
+    assert.equal(netOf(state, -100), 500, 'the ghost is still owed it')
+    assert.equal(state.members.length, 3, 'the merge was refused')
+  })
+
+  test('being named as a payer counts as activity', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: 2, paid_cents: 1000 }],
+        splits: [{ user_id: 1, share_cents: 1000 }],
+      }),
+      merged(-100, 2),
+    ])
+    assert.equal(state.members.length, 3, 'refused')
+  })
+
+  test('being named in a settlement counts as activity', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      ghost(-100, 'Fran'),
+      ev('settlement.created', {
+        settlement_id: 's1',
+        from: 2,
+        to: 1,
+        amount_cents: 100,
+        date: '2026-01-02',
+      }),
+      merged(-100, 2),
+    ])
+    assert.equal(state.members.length, 3, 'refused')
+  })
+
+  test('activity after the claim does not retroactively forbid it', () => {
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      member(2, 'Fran'),
+      merged(-100, 2),
+      expense('e1', {
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: 2, share_cents: 500 },
+        ],
+      }),
+    ])
+    assert.equal(netOf(state, 2), -500)
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 2]
     )
   })
 })

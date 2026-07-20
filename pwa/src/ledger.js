@@ -108,11 +108,32 @@ export function computeState(events) {
   // comment_id -> { ev: latest revision, createdId, author } (author edits own)
   const commentRev = {}
 
+  // Member ids that have taken part in anything financial. A merge may only
+  // name an unused member as the claimer, so that claiming a ghost can never
+  // double as a way to net off your own balance. See plan/12.
+  const active = new Set()
+  const noteActive = (rows, key) => {
+    for (const row of rows ?? []) active.add(row[key])
+  }
+
   for (const e of events) {
     if (e.type === 'member.added') {
       if (!memberIds.includes(e.payload.user_id)) {
         members.push({ id: e.payload.user_id, display_name: e.payload.display_name })
         memberIds.push(e.payload.user_id)
+      }
+    } else if (e.type === 'member.ghost_added') {
+      // Someone splitting expenses with the group who doesn't use the app.
+      // Identical to a member everywhere the money is concerned.
+      const p = e.payload
+      if (!p || typeof p.member_id !== 'number') continue
+      if (!memberIds.includes(p.member_id)) {
+        members.push({
+          id: p.member_id,
+          display_name: p.display_name || 'someone',
+          ghost: true,
+        })
+        memberIds.push(p.member_id)
       }
     } else if (e.type === 'expense.created' || e.type === 'expense.updated') {
       const p = e.payload
@@ -121,6 +142,8 @@ export function computeState(events) {
       // WIP data is disposable, no backfill.
       if (!p || !p.expense_id) continue
       if (!Array.isArray(p.payers) || !Array.isArray(p.splits)) continue
+      noteActive(p.payers, 'user_id')
+      noteActive(p.splits, 'user_id')
       const prev = latest[p.expense_id]
       if (!prev || e.id > prev.id) latest[p.expense_id] = e
     } else if (
@@ -129,12 +152,17 @@ export function computeState(events) {
     ) {
       const p = e.payload
       if (!p || !p.settlement_id) continue
+      active.add(p.from)
+      active.add(p.to)
       const prev = settle[p.settlement_id]
       if (!prev || e.id > prev.id) settle[p.settlement_id] = e
     } else if (e.type === 'member.merged') {
       const p = e.payload
       if (!p || !p.old_member_id || !p.new_member_id) continue
       if (p.old_member_id === p.new_member_id) continue
+      // A clean slate only. Otherwise claiming a ghost who is owed money would
+      // cancel the claimer's own debt with someone else's credit.
+      if (active.has(p.new_member_id)) continue
       alias.set(p.old_member_id, p.new_member_id)
     } else if (e.type === 'comment.created' || e.type === 'comment.updated') {
       const p = e.payload
@@ -258,6 +286,7 @@ export function computeState(events) {
   const balances = liveMembers.map((m) => ({
     user_id: m.id,
     display_name: m.display_name,
+    ghost: !!m.ghost,
     net_cents: paid[m.id] - owed[m.id],
   }))
   // Comments grouped under their expense, newest-created last (chronological).

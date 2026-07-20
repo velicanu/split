@@ -590,6 +590,42 @@ function ReceiptThumb({ groupId, receiptId }) {
   )
 }
 
+// A person in the split who isn't in the app. They pay, they owe, they settle
+// up — the ledger treats them exactly like anyone else.
+function AddGhost({ onAdd }) {
+  const [name, setName] = useState('')
+  const [error, setError] = useState('')
+
+  async function submit(e) {
+    e.preventDefault()
+    setError('')
+    if (!name.trim()) return setError('Give them a name')
+    try {
+      await onAdd(name.trim())
+      setName('')
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <h4>Someone not using the app</h4>
+      <p className="muted">
+        Add them by name and split with them as normal. If they join later,
+        their history can be handed over.
+      </p>
+      <input
+        placeholder="their name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <button type="submit">Add to the group</button>
+      {error && <p className="error">{error}</p>}
+    </form>
+  )
+}
+
 // Recovering an account, from the group's side. Deliberately plain and a
 // little grudging: it is an identity-level claim, and while any member can
 // already edit any expense, this one is easier to miss after the fact.
@@ -961,6 +997,16 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // Someone who lost every device signs up again and gets re-invited; this
   // reattaches their history to the account they can actually sign for. See
   // plan/07 — the group vouches for them, because the server cannot.
+  // Someone who splits expenses with the group but doesn't use the app.
+  // Negative ids so they can never collide with a server-issued user id, and
+  // still numbers so the split maths keeps working. See plan/12.
+  const addGhost = (display_name) =>
+    appendEvent('member.ghost_added', {
+      member_id: -(Math.floor(Math.random() * 2 ** 45) + 1),
+      display_name,
+      updated_at: Date.now(),
+    }).then(pull)
+
   const mergeMembers = (old_member_id, new_member_id) =>
     appendEvent('member.merged', {
       old_member_id,
@@ -1086,6 +1132,7 @@ export function GroupView({ groupId, me, ai, onBack }) {
       <h3>Settle up</h3>
       <SettleUp suggestions={suggestions} onRecord={recordSettlement} />
 
+      <AddGhost onAdd={addGhost} />
       <MergeMembers members={state.members} onMerge={mergeMembers} />
 
       {state.members.length > 0 && (

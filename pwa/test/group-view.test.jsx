@@ -578,3 +578,61 @@ describe('the ledger log', () => {
     assert.ok(!JSON.stringify(doc).includes('enc'), 'no sealed blobs in the file')
   })
 })
+
+describe('someone not using the app', () => {
+  test('can be added, and is split with like anyone else', async () => {
+    const api = await fakeApi()
+    await open()
+
+    const form = byText('h4', 'Someone not using the app')?.closest('form')
+    await change(form.querySelector('input'), 'Fran')
+    await submit(form)
+
+    const added = api.posted.find((e) => e.type === 'member.ghost_added')
+    assert.ok(added, 'a ghost was added')
+    assert.equal(added.payload.display_name, 'Fran')
+    // Negative so it can never collide with a server-issued user id, and a
+    // number so the split maths still works.
+    assert.ok(added.payload.member_id < 0)
+    assert.equal(typeof added.payload.member_id, 'number')
+
+    // They show up as someone to split with.
+    assert.ok(text().includes('Fran'))
+  })
+
+  test('is sealed like every other event', async () => {
+    const api = await fakeApi()
+    await open()
+    const form = byText('h4', 'Someone not using the app')?.closest('form')
+    await change(form.querySelector('input'), 'Fran')
+    await submit(form)
+
+    const raw = api.raw.find((e) => e.type === 'member.ghost_added')
+    assert.ok(raw.payload.enc, 'who is in a group is not the server’s business')
+    assert.ok(!JSON.stringify(raw).includes('Fran'))
+  })
+
+  test('two ghosts get different ids', async () => {
+    const api = await fakeApi()
+    await open()
+    for (const name of ['Fran', 'Sam']) {
+      const form = byText('h4', 'Someone not using the app')?.closest('form')
+      await change(form.querySelector('input'), name)
+      await submit(form)
+    }
+    const ids = api.posted
+      .filter((e) => e.type === 'member.ghost_added')
+      .map((e) => e.payload.member_id)
+    assert.equal(ids.length, 2)
+    assert.notEqual(ids[0], ids[1])
+  })
+
+  test('a nameless ghost is refused before it is sent', async () => {
+    const api = await fakeApi()
+    await open()
+    const form = byText('h4', 'Someone not using the app')?.closest('form')
+    await submit(form)
+    assert.ok(text().includes('Give them a name'))
+    assert.equal(api.posted.filter((e) => e.type === 'member.ghost_added').length, 0)
+  })
+})
