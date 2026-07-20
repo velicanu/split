@@ -24,6 +24,7 @@ import { planRevive } from './revive'
 import {
   forgetLocalLedger,
   localEvents,
+  localGroups,
   meta as localMeta,
   pendingCount,
   setMeta as setLocalMeta,
@@ -848,16 +849,34 @@ function LedgerLog({ group, version, events, unreadable, members, onClose }) {
   )
 }
 
-function GroupList({ onOpen }) {
+export function GroupList({ onOpen }) {
   const [groups, setGroups] = useState(null)
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
 
-  const load = () => api('groups').then(setGroups).catch((e) => setError(e.message))
+  // Local-first, like a group's own page. The server list is authoritative
+  // when reachable — it knows member counts and which groups you have hidden —
+  // and every entry is cached on the way through, so with no network the list
+  // is still whatever this device last saw rather than a blank page. plan/04.
+  const load = useCallback(async () => {
+    try {
+      const fresh = await api('groups')
+      setGroups(fresh)
+      for (const g of fresh) {
+        await setLocalMeta(g.id, { name: g.name, members: g.members })
+      }
+    } catch {
+      // Offline. Show the groups this device already knows the name of; a row
+      // with no name is one we hold events for but have never opened, and has
+      // nothing to show yet.
+      const local = await localGroups()
+      setGroups(local.filter((g) => g.name))
+    }
+  }, [])
   useEffect(() => {
     load()
-  }, [])
+  }, [load])
 
   async function create(e) {
     e.preventDefault()
@@ -904,7 +923,9 @@ function GroupList({ onOpen }) {
             <button className="row" onClick={() => onOpen(g.id)}>
               <span>{g.name}</span>
               <span className="muted">
-                {g.members} member{g.members === 1 ? '' : 's'}
+                {typeof g.members === 'number'
+                  ? `${g.members} member${g.members === 1 ? '' : 's'}`
+                  : 'offline'}
               </span>
             </button>
           </li>
