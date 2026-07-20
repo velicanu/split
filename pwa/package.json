@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --import ./test/setup.mjs --test \"src/*.test.js\" \"test/*.test.jsx\""
+    "test": "node --import ./test/setup.mjs --test --test-concurrency=1 \"src/*.test.js\" \"test/*.test.jsx\""
   },
   "dependencies": {
     "libsodium-wrappers-sumo": "^0.8.4",
