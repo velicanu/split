@@ -27,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 def reset_if_stale(conn):
@@ -130,10 +130,22 @@ def init_db():
             " code TEXT UNIQUE NOT NULL,"
             " created_by INTEGER NOT NULL REFERENCES users(id))"
         )
+        # `until_event_id` is what makes ghosting a fork rather than a race.
+        # A ghosted member keeps their membership and keeps being served the
+        # group — capped at the event that ghosted them. The cut is a position
+        # in the log, so it does not matter whether they sync a second later or
+        # a year later: they see exactly the prefix, deterministically.
+        #
+        # `hidden` is set when someone revives out of a group: the row stays,
+        # so their receipts and the frozen prefix remain reachable, but the
+        # group stops appearing in their list. A view preference rather than a
+        # secret — the server already knows who is in what.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memberships ("
             " group_id INTEGER NOT NULL REFERENCES groups(id),"
             " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " until_event_id INTEGER,"
+            " hidden INTEGER NOT NULL DEFAULT 0,"
             " PRIMARY KEY (group_id, user_id))"
         )
         # Append-only per-group event log. `id` is a global monotonic sequence
@@ -262,6 +274,8 @@ class GroupCreate(BaseModel):
 
 class JoinGroup(BaseModel):
     code: str
+    # The member id from the invite's `as=`, if it named one.
+    claims: int | None = None
 
 
 class EventIn(BaseModel):
@@ -568,6 +582,19 @@ def require_member(conn, group_id: int, user_id: int):
         raise HTTPException(404, "group not found")
 
 
+def require_writable_member(conn, group_id: int, user_id: int):
+    """A ghosted member may still read their frozen prefix, but must not write.
+    Otherwise they could keep appending events the group sees and they never
+    will — a one-way conversation into a ledger they have left."""
+    require_member(conn, group_id, user_id)
+    row = conn.execute(
+        "SELECT until_event_id FROM memberships WHERE group_id = ? AND user_id = ?",
+        (group_id, user_id),
+    ).fetchone()
+    if row["until_event_id"] is not None:
+        raise HTTPException(403, "you are no longer part of this group")
+
+
 def split_equally(amount_cents: int, member_ids: list[int]) -> dict[int, int]:
     """Reference split: whole cents, remainder distributed to the lowest member
     ids deterministically so shares always sum to the total. The client mirrors
@@ -597,21 +624,30 @@ def append_event(conn, group_id, event_id, type_, payload, author) -> int:
     return cur.lastrowid
 
 
-def add_member(conn, group_id, user):
+def add_member(conn, group_id, user, claims=None):
     """Record a membership and log a member.added event so clients folding the
-    ledger see the member set. Returns True if newly added."""
+    ledger see the member set. Returns True if newly added.
+
+    `claims` is the member id the invite named — the ghost this account is
+    taking over. It rides on member.added rather than being an event of its
+    own so that claiming can only ever happen at the instant of joining: there
+    is no event an already-joined member can write to become somebody else.
+    See plan/12."""
     cur = conn.execute(
         "INSERT OR IGNORE INTO memberships (group_id, user_id) VALUES (?, ?)",
         (group_id, user["id"]),
     )
     if not cur.rowcount:
         return False
+    payload = {"user_id": user["id"], "display_name": user["display_name"]}
+    if claims is not None:
+        payload["claims"] = claims
     append_event(
         conn,
         group_id,
         secrets.token_hex(16),
         "member.added",
-        {"user_id": user["id"], "display_name": user["display_name"]},
+        payload,
         user["id"],
     )
     return True
@@ -644,8 +680,9 @@ def list_groups(request: Request):
             "   AS members,"
             " (SELECT COALESCE(MAX(e.id), 0) FROM events e WHERE e.group_id = g.id)"
             "   AS version"
+            " , m.until_event_id AS until_event_id"
             " FROM groups g JOIN memberships m ON m.group_id = g.id"
-            " WHERE m.user_id = ? ORDER BY g.id DESC",
+            " WHERE m.user_id = ? AND m.hidden = 0 ORDER BY g.id DESC",
             (user["id"],),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -660,7 +697,24 @@ def join_group(body: JoinGroup, request: Request):
         ).fetchone()
         if not group:
             raise HTTPException(404, "no group with that code")
-        add_member(conn, group["id"], user)
+        if body.claims is not None:
+            if body.claims == user["id"]:
+                raise HTTPException(400, "cannot claim yourself")
+            # Claimed at most once, enforced here rather than trusted to the
+            # fold. member.added is the one event the server writes, and in the
+            # clear, which is what makes this checkable at all — under the old
+            # encrypted merge event a modified client could simply skip it.
+            #
+            # What the server cannot check is that the id is a real ghost:
+            # member.ghost_added is encrypted, so it has no idea who exists.
+            taken = conn.execute(
+                "SELECT 1 FROM events WHERE group_id = ? AND type = 'member.added'"
+                " AND json_extract(payload, '$.claims') = ?",
+                (group["id"], body.claims),
+            ).fetchone()
+            if taken:
+                raise HTTPException(409, "that member has already been claimed")
+        add_member(conn, group["id"], user, claims=body.claims)
     return {"id": group["id"], "name": group["name"], "code": group["code"]}
 
 
@@ -680,18 +734,35 @@ def get_events(group_id: int, request: Request, since: int = 0):
     user = require_user(request)
     with db() as conn:
         require_member(conn, group_id, user["id"])
+        # A ghosted member is served the group frozen at the event that ghosted
+        # them — never anything after. Capping here rather than deleting their
+        # membership is what makes the cut deterministic: it is a position in
+        # the log, not whenever they happened to sync.
+        cut = conn.execute(
+            "SELECT until_event_id FROM memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, user["id"]),
+        ).fetchone()["until_event_id"]
         rows = conn.execute(
             "SELECT id, event_id, type, payload, author, created_at FROM events"
-            " WHERE group_id = ? AND id > ? ORDER BY id",
-            (group_id, since),
+            " WHERE group_id = ? AND id > ? AND (? IS NULL OR id <= ?)"
+            " ORDER BY id",
+            (group_id, since, cut, cut),
         ).fetchall()
-        version = group_version(conn, group_id)
+        version = cut if cut is not None else group_version(conn, group_id)
     events = []
     for r in rows:
         e = dict(r)
         e["payload"] = json.loads(e["payload"])
         events.append(e)
     return {"version": version, "events": events}
+
+
+class GhostIn(BaseModel):
+    # The member being ghosted, and the event that records it. The event is
+    # appended by the client (it is encrypted, so the server cannot write it);
+    # this call is what freezes their feed at that point.
+    member_id: int
+    at_event_id: int
 
 
 class GroupKeysIn(BaseModel):
@@ -762,6 +833,67 @@ def put_group_keys(group_id: int, body: GroupKeysIn, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/groups/{group_id}/hide")
+def hide_group(group_id: int, request: Request, hidden: bool = True):
+    """Stop showing a group in this user's list, without leaving it.
+
+    Set when someone revives out of a group. The membership row stays, so the
+    frozen prefix and their receipts remain reachable and the decision about
+    what receipts should do stays open. Reversible on purpose."""
+    user = require_user(request)
+    with db() as conn:
+        require_member(conn, group_id, user["id"])
+        conn.execute(
+            "UPDATE memberships SET hidden = ? WHERE group_id = ? AND user_id = ?",
+            (1 if hidden else 0, group_id, user["id"]),
+        )
+    return {"ok": True, "hidden": hidden}
+
+
+@app.post("/api/groups/{group_id}/ghost")
+def ghost_member(group_id: int, body: GhostIn, request: Request):
+    """Freeze a member's view of the group at a given event.
+
+    Any member may do this to any member, including themselves — leaving is
+    just ghosting yourself. The person keeps their membership row and keeps
+    being served the group, capped at `at_event_id`, so what they already had
+    is never taken away; they simply stop receiving what comes next.
+
+    When nobody is left reading the group, it is deleted outright."""
+    user = require_user(request)
+    with db() as conn:
+        require_member(conn, group_id, user["id"])
+        target = conn.execute(
+            "SELECT until_event_id FROM memberships WHERE group_id = ? AND user_id = ?",
+            (group_id, body.member_id),
+        ).fetchone()
+        if not target:
+            # A ghost id, or somebody who was never here. The ledger event is
+            # what matters for those; there is no feed to freeze.
+            return {"ok": True, "deleted": False}
+        if target["until_event_id"] is None:
+            conn.execute(
+                "UPDATE memberships SET until_event_id = ?"
+                " WHERE group_id = ? AND user_id = ?",
+                (body.at_event_id, group_id, body.member_id),
+            )
+
+        live = conn.execute(
+            "SELECT COUNT(*) FROM memberships"
+            " WHERE group_id = ? AND until_event_id IS NULL",
+            (group_id,),
+        ).fetchone()[0]
+        if live:
+            return {"ok": True, "deleted": False}
+
+        # Nobody is reading it any more. Membership reaching zero is one of the
+        # few things the server can decide without reading a payload.
+        for table in ("events", "receipts", "group_keys", "memberships"):
+            conn.execute(f"DELETE FROM {table} WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+    return {"ok": True, "deleted": True}
+
+
 @app.get("/api/account/box")
 def my_box_key(request: Request):
     """This account's X25519 public key, so a freshly enrolled device can seal
@@ -804,7 +936,7 @@ def upload_receipt(group_id: int, body: ReceiptIn, request: Request):
         raise HTTPException(400, "receipt id is not the hash of the content")
 
     with db() as conn:
-        require_member(conn, group_id, user["id"])
+        require_writable_member(conn, group_id, user["id"])
         # Content-addressed, so re-uploading the same blob is a no-op rather
         # than a conflict.
         conn.execute(
@@ -850,7 +982,7 @@ def post_event(group_id: int, body: EventIn, request: Request):
         # create/join, not forgeable through the generic event endpoint
         raise HTTPException(400, "membership changes are not appended directly")
     with db() as conn:
-        require_member(conn, group_id, user["id"])
+        require_writable_member(conn, group_id, user["id"])
         existing = conn.execute(
             "SELECT id FROM events WHERE event_id = ?", (body.event_id,)
         ).fetchone()

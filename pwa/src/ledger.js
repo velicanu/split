@@ -62,7 +62,7 @@ export function receiptWeights(items, participantIds) {
   return weights
 }
 
-// Resolve a chain of merges to whoever the person is now. Merges compose —
+// Resolve a chain of claims to whoever the person is now. Claims compose —
 // lose your account twice and you get A -> B -> C — and a malformed pair could
 // name a cycle, so this walks with a guard rather than trusting the data.
 function resolver(alias) {
@@ -77,7 +77,7 @@ function resolver(alias) {
       if (seen.has(next)) {
         // A cycle — nonsense data, but it still has to fold to *something*,
         // and every client must pick the same something. Stopping mid-walk
-        // instead would let both ends of a two-way merge vanish, taking their
+        // instead would let both ends of a two-way claim vanish, taking their
         // balances with them.
         current = Math.min(...chain.slice(chain.indexOf(next)))
         break
@@ -95,10 +95,15 @@ function resolver(alias) {
 export function computeState(events) {
   const members = []
   const memberIds = []
-  // old member id -> the account that person uses now. Losing every device
-  // means starting a new account; this is what reattaches their history to
-  // them instead of stranding it under an identity nobody can sign for.
+  // claimed member id -> the account that claimed it. Losing every device means
+  // starting a new account; this is what reattaches their history to them
+  // instead of stranding it under an identity nobody can sign for. Built only
+  // from `member.added`, so a claim can only ever happen at the moment of
+  // joining. See plan/12.
   const alias = new Map()
+  // Members who have been turned into ghosts. They keep their history and
+  // their balances; they simply have nobody attached any more.
+  const ghosted = new Set()
   // expense_id -> its latest event. An edit is just a new expense.updated row
   // with the same expense_id; the latest one wins (append order is the total
   // order). Both payers and splits are frozen per revision.
@@ -108,19 +113,22 @@ export function computeState(events) {
   // comment_id -> { ev: latest revision, createdId, author } (author edits own)
   const commentRev = {}
 
-  // Member ids that have taken part in anything financial. A merge may only
-  // name an unused member as the claimer, so that claiming a ghost can never
-  // double as a way to net off your own balance. See plan/12.
-  const active = new Set()
-  const noteActive = (rows, key) => {
-    for (const row of rows ?? []) active.add(row[key])
-  }
-
   for (const e of events) {
     if (e.type === 'member.added') {
-      if (!memberIds.includes(e.payload.user_id)) {
-        members.push({ id: e.payload.user_id, display_name: e.payload.display_name })
-        memberIds.push(e.payload.user_id)
+      const p = e.payload
+      if (!p) continue
+      if (!memberIds.includes(p.user_id)) {
+        members.push({ id: p.user_id, display_name: p.display_name })
+        memberIds.push(p.user_id)
+      }
+      // Joining and taking over a ghost are one act. There is no separate
+      // event for this, which is precisely what makes it impossible for
+      // someone already in the group to become somebody else.
+      if (typeof p.claims === 'number' && p.claims !== p.user_id) {
+        // First claim wins. The server enforces this too — `member.added` is
+        // the one event it writes, and in the clear — but the fold still has
+        // to be deterministic if it is ever handed a log that says otherwise.
+        if (!alias.has(p.claims)) alias.set(p.claims, p.user_id)
       }
     } else if (e.type === 'member.ghost_added') {
       // Someone splitting expenses with the group who doesn't use the app.
@@ -142,8 +150,6 @@ export function computeState(events) {
       // WIP data is disposable, no backfill.
       if (!p || !p.expense_id) continue
       if (!Array.isArray(p.payers) || !Array.isArray(p.splits)) continue
-      noteActive(p.payers, 'user_id')
-      noteActive(p.splits, 'user_id')
       const prev = latest[p.expense_id]
       if (!prev || e.id > prev.id) latest[p.expense_id] = e
     } else if (
@@ -152,22 +158,16 @@ export function computeState(events) {
     ) {
       const p = e.payload
       if (!p || !p.settlement_id) continue
-      active.add(p.from)
-      active.add(p.to)
       const prev = settle[p.settlement_id]
       if (!prev || e.id > prev.id) settle[p.settlement_id] = e
-    } else if (e.type === 'member.merged') {
+    } else if (e.type === 'member.left') {
+      // Anyone may ghost anyone, including themselves — leaving is ghosting
+      // yourself. What stops this being a hostile act is that it takes nothing
+      // away: the server keeps serving the ghosted member the group frozen at
+      // this event, so they retain everything they already had. See plan/12.
       const p = e.payload
-      if (!p || !p.old_member_id || !p.new_member_id) continue
-      if (p.old_member_id === p.new_member_id) continue
-      // A clean slate only. Otherwise claiming a ghost who is owed money would
-      // cancel the claimer's own debt with someone else's credit.
-      if (active.has(p.new_member_id)) continue
-      // First claim wins. An invite link names a member to become, so a link
-      // used twice would otherwise let the second person silently displace the
-      // first — who would then be a member with no history and no sign of why.
-      if (alias.has(p.old_member_id)) continue
-      alias.set(p.old_member_id, p.new_member_id)
+      if (!p || typeof p.member_id !== 'number') continue
+      ghosted.add(p.member_id)
     } else if (e.type === 'comment.created' || e.type === 'comment.updated') {
       const p = e.payload
       if (!p || !p.comment_id || !p.expense_id) continue
@@ -178,15 +178,18 @@ export function computeState(events) {
   }
 
   const resolve = resolver(alias)
-  // Everyone a merge pointed away from stops being a separate person.
-  const mergedAway = new Set(
+  // Everyone a claim pointed away from stops being a separate person.
+  const claimedAway = new Set(
     [...alias.keys()].filter((id) => resolve(id) !== id)
   )
-  const liveMembers = members.filter((m) => !mergedAway.has(m.id))
+  const liveMembers = members
+    .filter((m) => !claimedAway.has(m.id))
+    // A ghosted member is still a member of the split, just not of the app.
+    .map((m) => (ghosted.has(m.id) ? { ...m, ghost: true } : m))
   const liveMemberIds = liveMembers.map((m) => m.id)
 
   // The recipe is display and re-edit state, so its ids need resolving too —
-  // otherwise a merged-away person lingers as a ghost in the receipt editor.
+  // otherwise a claimed-away person lingers as a ghost in the receipt editor.
   const resolveRecipe = (split) => {
     if (!split) return null
     const out = { ...split }
@@ -210,8 +213,8 @@ export function computeState(events) {
     return out
   }
 
-  // Sum rather than overwrite: after a merge an expense can name both the old
-  // identity and the new one, and that person owes the total of the two.
+  // Sum rather than overwrite: after a claim an expense can name both the ghost
+  // and the account that claimed it, and that person owes the total of the two.
   const mergeRows = (rows, idKey, amountKey) => {
     const totals = new Map()
     for (const row of rows) {
@@ -302,7 +305,7 @@ export function computeState(events) {
       comment_id: c.ev.payload.comment_id,
       expense_id: eid,
       text: c.ev.payload.text,
-      // Resolved so that after a merge you can still edit what you wrote.
+      // Resolved so that after a claim you can still edit what you wrote.
       author: resolve(c.author),
       author_name: nameById[resolve(c.author)] || '?',
       created_id: c.createdId,

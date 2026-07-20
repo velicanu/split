@@ -193,7 +193,13 @@ const ev = (type, payload, author) => ({
   payload,
   author,
 })
-const member = (id, display_name) => ev('member.added', { user_id: id, display_name })
+// `claims` is the member id an invite named: the ghost this account takes
+// over as it joins. Absent for an ordinary join.
+const member = (id, display_name, claims) =>
+  ev('member.added',
+    claims === undefined
+      ? { user_id: id, display_name }
+      : { user_id: id, display_name, claims })
 const expense = (expense_id, over = {}) =>
   ev('expense.created', {
     expense_id,
@@ -650,16 +656,18 @@ describe('the whole pipeline', () => {
   })
 })
 
-describe('merging a member into their new account', () => {
-  // Losing every device means starting a new account. A merge reattaches the
-  // old identity's history to the new one; see plan/07 and plan/11.
-  const merged = (old_member_id, new_member_id) =>
-    ev('member.merged', { old_member_id, new_member_id })
+describe('claiming a member at the moment of joining', () => {
+  // Losing every device means starting a new account. The new account claims
+  // the old member id as it joins, reattaching that history to an identity
+  // that can actually sign for itself. There is no separate event for this —
+  // the claim is a field on the join — which is what makes it impossible for
+  // someone already in the group to become somebody else. See plan/12.
+  const joins = (id, display_name, claimed) => member(id, display_name, claimed)
 
-  const base = () => [member(1, 'v'), member(2, 'd'), member(3, 'd-again')]
+  const base = () => [member(1, 'v'), member(2, 'd')]
 
   test('the old identity stops being a separate person', () => {
-    const state = computeState([...base(), merged(2, 3)])
+    const state = computeState([...base(), joins(3, 'd-again', 2)])
     assert.deepEqual(
       state.members.map((m) => m.id),
       [1, 3]
@@ -668,7 +676,7 @@ describe('merging a member into their new account', () => {
   })
 
   test('what they owed follows them', () => {
-    const state = computeState([...base(), expense('e1'), merged(2, 3)])
+    const state = computeState([...base(), expense('e1'), joins(3, 'd-again', 2)])
     // The expense split 1000 between members 1 and 2; 2 is now 3.
     assert.equal(netOf(state, 1), 500)
     assert.equal(netOf(state, 3), -500)
@@ -688,18 +696,18 @@ describe('merging a member into their new account', () => {
           { user_id: 2, share_cents: 500 },
         ],
       }),
-      merged(2, 3),
+      joins(3, 'd-again', 2),
     ])
     assert.equal(netOf(state, 3), 500)
     assert.equal(netOf(state, 1), -500)
   })
 
   test('an expense naming both identities sums rather than overwrites', () => {
-    // Happens when an old expense is edited after the merge: it still names
+    // Happens when an old expense is edited after the claim: it still names
     // the lost identity, and now names the new one too.
     const state = computeState([
       ...base(),
-      merged(2, 3),
+      joins(3, 'd-again', 2),
       expense('e1', {
         amount_cents: 900,
         payers: [{ user_id: 1, paid_cents: 900 }],
@@ -726,7 +734,7 @@ describe('merging a member into their new account', () => {
         amount_cents: 500,
         date: '2026-01-02',
       }),
-      merged(2, 3),
+      joins(3, 'd-again', 2),
     ])
     assert.equal(netOf(state, 1), 0)
     assert.equal(netOf(state, 3), 0)
@@ -739,7 +747,7 @@ describe('merging a member into their new account', () => {
       ...base(),
       expense('e1'),
       ev('comment.created', { comment_id: 'c1', expense_id: 'e1', text: 'hi' }, 2),
-      merged(2, 3),
+      joins(3, 'd-again', 2),
     ])
     const [comment] = state.ledger[0].comments
     assert.equal(comment.author, 3)
@@ -756,7 +764,7 @@ describe('merging a member into their new account', () => {
           items: [{ id: 'i1', price_cents: 1000, claimed_by: [2] }],
         },
       }),
-      merged(2, 3),
+      joins(3, 'd-again', 2),
     ])
     const recipe = state.ledger[0].split
     assert.deepEqual(recipe.participants, [1, 3])
@@ -767,18 +775,17 @@ describe('merging a member into their new account', () => {
     const state = computeState([
       ...base(),
       expense('e1', { split: { mode: 'percentage', weights: { 1: 50, 2: 30, 3: 20 } } }),
-      merged(2, 3),
+      joins(3, 'd-again', 2),
     ])
     assert.deepEqual(state.ledger[0].split.weights, { 1: 50, 3: 50 })
   })
 
-  test('merges chain, so losing your account twice still works', () => {
+  test('claims chain, so losing your account twice still works', () => {
     const state = computeState([
       ...base(),
-      member(4, 'd-third'),
       expense('e1'),
-      merged(2, 3),
-      merged(3, 4),
+      joins(3, 'd-again', 2),
+      joins(4, 'd-third', 3),
     ])
     assert.deepEqual(
       state.members.map((m) => m.id),
@@ -788,16 +795,15 @@ describe('merging a member into their new account', () => {
   })
 
   test('a cycle picks the same survivor whichever end is looked at first', () => {
-    // Nonsense data, but every client must still agree. Resolution order
-    // follows the order the merges arrive in, so the two orderings below would
-    // otherwise strand the balance under different members on different
-    // devices — the one failure this whole architecture exists to avoid.
-    // Members 3 and 4 have no activity, so both merges are admissible and a
-    // cycle can actually form.
-    const cycle = [member(4, 'd-third'), expense('e1'), merged(3, 4), merged(4, 3)]
-    const reversed = [member(4, 'd-third'), expense('e1'), merged(4, 3), merged(3, 4)]
-    const forwards = computeState([...base(), ...cycle])
-    const backwards = computeState([...base(), ...reversed])
+    // Nonsense data — the server refuses a second claim on the same id — but
+    // every client must still agree if it ever arrives. Resolution follows
+    // arrival order, so the two orderings below would otherwise strand the
+    // balance under different members on different devices: the one failure
+    // this whole architecture exists to avoid.
+    const cycle = [joins(3, 'c', 4), joins(4, 'd', 3)]
+    const reversed = [joins(4, 'd', 3), joins(3, 'c', 4)]
+    const forwards = computeState([...base(), expense('e1'), ...cycle])
+    const backwards = computeState([...base(), expense('e1'), ...reversed])
 
     assert.deepEqual(
       forwards.members.map((m) => m.id),
@@ -817,29 +823,38 @@ describe('merging a member into their new account', () => {
   })
 
   test('a cycle is survived rather than hung on', () => {
-    // Nonsense data, but it must not spin forever.
-    const state = computeState([...base(), expense('e1'), merged(2, 3), merged(3, 2)])
+    const state = computeState([
+      ...base(),
+      expense('e1'),
+      joins(3, 'x', 2),
+      joins(4, 'y', 3),
+      joins(5, 'z', 4),
+    ])
     assert.equal(
       state.balances.reduce((t, b) => t + b.net_cents, 0),
       0
     )
   })
 
-  test('malformed and self merges are ignored', () => {
+  test('malformed and self claims are ignored', () => {
     const state = computeState([
       ...base(),
       expense('e1'),
-      ev('member.merged', null),
-      ev('member.merged', { old_member_id: 2 }),
-      ev('member.merged', { old_member_id: 2, new_member_id: 2 }),
+      ev('member.added', null),
+      joins(3, 'themselves', 3),
+      member(4, 'no claim at all'),
     ])
-    assert.equal(state.members.length, 3)
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 2, 3, 4]
+    )
     assert.equal(netOf(state, 2), -500)
   })
 
-  test('balances still sum to zero after a merge', () => {
+  test('balances still sum to zero after a claim', () => {
     const state = computeState([
       ...base(),
+      member(3, 'm'),
       expense('e1'),
       expense('e2', {
         amount_cents: 999,
@@ -850,12 +865,29 @@ describe('merging a member into their new account', () => {
           { user_id: 3, share_cents: 333 },
         ],
       }),
-      merged(2, 3),
+      joins(4, 'd-again', 2),
     ])
     assert.equal(
       state.balances.reduce((t, b) => t + b.net_cents, 0),
       0
     )
+  })
+
+  test('there is no event that lets an existing member become someone else', () => {
+    // The point of the whole design. A claim only ever rides on a join, so a
+    // member who is already here has nothing to write.
+    const state = computeState([
+      ...base(),
+      expense('e1'),
+      ev('member.merged', { old_member_id: 1, new_member_id: 2 }),
+    ])
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 2],
+      'the retired event type does nothing at all'
+    )
+    assert.equal(netOf(state, 1), 500)
+    assert.equal(netOf(state, 2), -500)
   })
 })
 
@@ -957,10 +989,8 @@ describe('ghost members', () => {
 describe('claiming a ghost', () => {
   const ghost = (member_id, display_name) =>
     ev('member.ghost_added', { member_id, display_name })
-  const merged = (old_member_id, new_member_id) =>
-    ev('member.merged', { old_member_id, new_member_id })
 
-  test('an unused member takes on the ghost’s history', () => {
+  test('the ghost’s history becomes the joiner’s', () => {
     const state = computeState([
       member(1, 'v'),
       ghost(-100, 'Fran'),
@@ -971,9 +1001,8 @@ describe('claiming a ghost', () => {
           { user_id: -100, share_cents: 500 },
         ],
       }),
-      // Fran signs up and joins.
-      member(2, 'Fran'),
-      merged(-100, 2),
+      // Fran accepts an invite naming the ghost, and joins as it.
+      member(2, 'Fran', -100),
     ])
     assert.equal(netOf(state, 2), -500, 'the debt followed the person')
     assert.deepEqual(
@@ -982,64 +1011,13 @@ describe('claiming a ghost', () => {
     )
   })
 
-  test('a member who has already spent cannot claim one', () => {
-    // The attack: I owe 500, the ghost is owed 500, so claiming them would
-    // cancel my debt using someone else's credit.
-    const state = computeState([
-      member(1, 'v'),
-      member(2, 'd'),
-      ghost(-100, 'Fran'),
-      expense('e1', {
-        payers: [{ user_id: -100, paid_cents: 1000 }],
-        splits: [
-          { user_id: 2, share_cents: 500 },
-          { user_id: -100, share_cents: 500 },
-        ],
-      }),
-      merged(-100, 2),
-    ])
-    assert.equal(netOf(state, 2), -500, 'still owes it')
-    assert.equal(netOf(state, -100), 500, 'the ghost is still owed it')
-    assert.equal(state.members.length, 3, 'the merge was refused')
-  })
-
-  test('being named as a payer counts as activity', () => {
-    const state = computeState([
-      member(1, 'v'),
-      member(2, 'd'),
-      ghost(-100, 'Fran'),
-      expense('e1', {
-        payers: [{ user_id: 2, paid_cents: 1000 }],
-        splits: [{ user_id: 1, share_cents: 1000 }],
-      }),
-      merged(-100, 2),
-    ])
-    assert.equal(state.members.length, 3, 'refused')
-  })
-
-  test('being named in a settlement counts as activity', () => {
-    const state = computeState([
-      member(1, 'v'),
-      member(2, 'd'),
-      ghost(-100, 'Fran'),
-      ev('settlement.created', {
-        settlement_id: 's1',
-        from: 2,
-        to: 1,
-        amount_cents: 100,
-        date: '2026-01-02',
-      }),
-      merged(-100, 2),
-    ])
-    assert.equal(state.members.length, 3, 'refused')
-  })
-
-  test('activity after the claim does not retroactively forbid it', () => {
+  test('spending afterwards is ordinary', () => {
+    // There is no longer any rule about the claimer's prior activity, because
+    // a claim can only happen on a join and a joiner has no history yet.
     const state = computeState([
       member(1, 'v'),
       ghost(-100, 'Fran'),
-      member(2, 'Fran'),
-      merged(-100, 2),
+      member(2, 'Fran', -100),
       expense('e1', {
         payers: [{ user_id: 1, paid_cents: 1000 }],
         splits: [
@@ -1054,18 +1032,37 @@ describe('claiming a ghost', () => {
       [1, 2]
     )
   })
+
+  test('a ghost who is owed money carries their credit across', () => {
+    // Worth stating plainly: claiming a ghost who is owed money hands you that
+    // credit, and nothing here prevents it. What guards it is that the claim
+    // is in the log, in the clear, for everyone to see. See plan/12.
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: -100, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+      member(2, 'Fran', -100),
+    ])
+    assert.equal(netOf(state, 2), 500)
+  })
 })
 
 describe('a member can only be claimed once', () => {
   const ghost = (member_id, display_name) =>
     ev('member.ghost_added', { member_id, display_name })
-  const merged = (old_member_id, new_member_id) =>
-    ev('member.merged', { old_member_id, new_member_id })
 
   test('the first claim wins and the second is ignored', () => {
     // An invite link names a member to become. Used twice, the second person
     // would otherwise displace the first, who would become a member with no
-    // history and no sign of what happened.
+    // history and no sign of what happened. The server refuses the second
+    // join outright; the fold refuses it too, so a log that somehow carries
+    // both still folds the same way everywhere.
     const state = computeState([
       member(1, 'v'),
       ghost(-100, 'Fran'),
@@ -1076,10 +1073,8 @@ describe('a member can only be claimed once', () => {
           { user_id: -100, share_cents: 500 },
         ],
       }),
-      member(2, 'Fran'),
-      merged(-100, 2),
-      member(3, 'impostor'),
-      merged(-100, 3),
+      member(2, 'Fran', -100),
+      member(3, 'impostor', -100),
     ])
     assert.equal(netOf(state, 2), -500, 'the first claimant kept the history')
     assert.equal(netOf(state, 3), 0, 'the second got nothing')
@@ -1090,21 +1085,93 @@ describe('a member can only be claimed once', () => {
   })
 
   test('chains still work, because a target is not a claimed id', () => {
-    // Losing an account twice: 2 -> 3 -> 4. The second merge names 3 as the
-    // one being claimed, and 3 was previously a target, not a claim.
+    // Losing an account twice: 2 -> 3 -> 4. The second join claims 3, and 3
+    // was previously a claimer, not something claimed.
     const state = computeState([
       member(1, 'v'),
       member(2, 'd'),
       expense('e1'),
-      member(3, 'd-again'),
-      merged(2, 3),
-      member(4, 'd-third'),
-      merged(3, 4),
+      member(3, 'd-again', 2),
+      member(4, 'd-third', 3),
     ])
     assert.equal(netOf(state, 4), -500)
     assert.deepEqual(
       state.members.map((m) => m.id),
       [1, 4]
     )
+  })
+})
+
+describe('ghosting a member', () => {
+  const left = (member_id, author) => ev('member.left', { member_id }, author)
+
+  test('their balances are untouched — they just stop being an app user', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      left(2, 1),
+    ])
+    assert.equal(netOf(state, 2), -500, 'still owes exactly what they owed')
+    assert.equal(netOf(state, 1), 500)
+    assert.equal(state.members.length, 2, 'still in the split')
+    assert.equal(state.balances.find((b) => b.user_id === 2).ghost, true)
+  })
+
+  test('anyone may ghost anyone, including someone who did not ask', () => {
+    // Deliberate: it takes nothing away, since the server keeps serving them
+    // the group frozen at this point. See plan/12.
+    const state = computeState([member(1, 'v'), member(2, 'd'), left(2, 1)])
+    assert.equal(state.balances.find((b) => b.user_id === 2).ghost, true)
+  })
+
+  test('leaving is ghosting yourself', () => {
+    const state = computeState([member(1, 'v'), member(2, 'd'), left(2, 2)])
+    assert.equal(state.balances.find((b) => b.user_id === 2).ghost, true)
+  })
+
+  test('a ghosted member can still be settled up with', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      left(2, 1),
+      ev('settlement.created', {
+        settlement_id: 's1',
+        from: 2,
+        to: 1,
+        amount_cents: 500,
+        date: '2026-01-02',
+      }),
+    ])
+    assert.equal(netOf(state, 2), 0)
+    assert.equal(netOf(state, 1), 0)
+  })
+
+  test('a ghosted member can be claimed, which is how recovery works', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      left(2, 1),
+      // Ghosted first, then invited back as that ghost — which is the whole
+      // recovery path now that claiming only happens on a join.
+      member(3, 'd-again', 2),
+    ])
+    assert.equal(netOf(state, 3), -500, 'the debt followed them to the new account')
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 3]
+    )
+  })
+
+  test('a malformed leave is ignored', () => {
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      ev('member.left', null, 1),
+      ev('member.left', { member_id: 'nope' }, 1),
+    ])
+    assert.equal(state.balances.every((b) => !b.ghost), true)
   })
 })
