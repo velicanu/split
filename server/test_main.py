@@ -98,6 +98,43 @@ def test_membership_not_forgeable_via_event_log():
     assert r.status_code == 400
 
 
+# Every event type the client writes through the generic endpoint. The guard
+# above once matched the whole `member.` prefix, which silently rejected the
+# two membership events the ghost feature is built from — so adding a ghost,
+# inviting (which mints one), and leaving all 400'd in production while both
+# test suites stayed green.
+#
+# Add to this list when the client learns to write a new event type. It is the
+# one place that says what the server has agreed to accept.
+CLIENT_WRITTEN_EVENTS = [
+    "expense.created",
+    "expense.updated",
+    "settlement.created",
+    "settlement.updated",
+    "comment.created",
+    "comment.updated",
+    "member.ghost_added",
+    "member.left",
+    "group.revived_from",
+]
+
+
+def test_the_server_accepts_every_event_the_client_writes():
+    owner = signed_up("ghost-writer")
+    group = owner.post("/api/groups", json={"name": "Flat"}).json()
+    gid = group["id"]
+
+    for i, type_ in enumerate(CLIENT_WRITTEN_EVENTS):
+        r = owner.post(
+            f"/api/groups/{gid}/events",
+            json={"event_id": f"e{i}", "type": type_, "payload": {"enc": "sealed"}},
+        )
+        assert r.status_code == 200, f"{type_} was refused: {r.json()}"
+
+    stored = {e["type"] for e in events_of(owner, gid)["events"]}
+    assert stored >= set(CLIENT_WRITTEN_EVENTS)
+
+
 def test_group_access_control():
     owner = signed_up("frank")
     group = owner.post("/api/groups", json={"name": "Flat2"}).json()

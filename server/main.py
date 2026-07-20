@@ -977,10 +977,15 @@ def post_event(group_id: int, body: EventIn, request: Request):
     user = require_user(request)
     if not body.event_id or not body.type:
         raise HTTPException(400, "event_id and type required")
-    if body.type.startswith("member."):
-        # membership is server-owned routing state; it is logged by
-        # create/join, not forgeable through the generic event endpoint
-        raise HTTPException(400, "membership changes are not appended directly")
+    if body.type == "member.added":
+        # The member list is server-owned routing state, logged by create and
+        # join. A client able to forge it could write somebody into a group,
+        # or claim a member id the server refused them.
+        #
+        # Only this one event. `member.ghost_added` and `member.left` are
+        # ledger claims any member may make, sealed like everything else — a
+        # prefix match here silently broke every ghost path. See plan/12.
+        raise HTTPException(400, "member.added is written by the server")
     with db() as conn:
         require_writable_member(conn, group_id, user["id"])
         existing = conn.execute(
