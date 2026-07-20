@@ -342,3 +342,18 @@ input.pay-amt {
   font-size: 0.8rem;
   font-family: ui-monospace, monospace;
 }
+
+.log-entry {
+  align-items: flex-start;
+}
+
+.log-payload {
+  margin: 0.4rem 0 0;
+  padding: 0.5rem;
+  background: #f1f5f9;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}

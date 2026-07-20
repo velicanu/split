@@ -497,3 +497,84 @@ describe('recovering an account from the group side', () => {
     assert.equal(api.posted.filter((e) => e.type === 'member.merged').length, 0)
   })
 })
+
+describe('the ledger log', () => {
+  const seed = [
+    {
+      id: 3,
+      type: 'expense.created',
+      author: 1,
+      payload: {
+        expense_id: 'e1',
+        description: 'Dinner at the Anchor',
+        amount_cents: 4350,
+        payers: [{ user_id: 1, paid_cents: 4350 }],
+        splits: [
+          { user_id: 1, share_cents: 2175 },
+          { user_id: 2, share_cents: 2175 },
+        ],
+        date: '2026-01-01',
+      },
+    },
+  ]
+
+  const openLog = async () => {
+    const api = await fakeApi({ seed })
+    await open()
+    await click(byText('button', 'log'))
+    return api
+  }
+
+  test('opens from the group and lists every entry in order', async () => {
+    await openLog()
+    const entries = $$('.log-entry').map((li) => li.textContent)
+    assert.equal(entries.length, 3, 'two joins and the expense')
+    assert.ok(entries[0].includes('member.added'))
+    assert.ok(entries[2].includes('expense.created'))
+    // Ordered by the server's sequence, which is what the fold depends on.
+    assert.deepEqual(
+      entries.map((t) => t.match(/#(\d+)/)[1]),
+      ['1', '2', '3']
+    )
+  })
+
+  test('hides payloads until asked, then shows them verbatim', async () => {
+    await openLog()
+    // Scoped to the payload blocks: the description also appears in the
+    // ledger row behind the modal, which says nothing about this feature.
+    assert.equal($$('.log-payload').length, 0)
+
+    await click(byText('button', 'raw'))
+    const payloads = $$('.log-payload').map((p) => p.textContent).join('')
+    assert.equal($$('.log-payload').length, 3)
+    // Verbatim: raw cents, not the formatted "$43.50" the UI shows.
+    assert.ok(payloads.includes('"amount_cents": 4350'))
+    assert.ok(payloads.includes('Dinner at the Anchor'))
+  })
+
+  test('downloads the decrypted log, not the ciphertext', async () => {
+    // The file has to be re-foldable by anyone, so it must contain the events
+    // themselves rather than the sealed blobs the server holds.
+    await openLog()
+
+    let saved = null
+    const realCreate = URL.createObjectURL
+    URL.createObjectURL = (blob) => {
+      saved = blob
+      return 'blob:stub'
+    }
+    URL.revokeObjectURL = () => {}
+    try {
+      await click(byText('button', 'Download JSON'))
+    } finally {
+      URL.createObjectURL = realCreate
+    }
+
+    assert.ok(saved, 'a file was produced')
+    const doc = JSON.parse(await saved.text())
+    assert.equal(doc.format, 'split.ledger.v1')
+    assert.equal(doc.event_count, 3)
+    assert.equal(doc.events[2].payload.description, 'Dinner at the Anchor')
+    assert.ok(!JSON.stringify(doc).includes('enc'), 'no sealed blobs in the file')
+  })
+})
