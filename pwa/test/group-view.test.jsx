@@ -18,6 +18,7 @@ import {
   sealTo,
 } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
+import { forgetLocalLedger } from '../src/store.js'
 import { forgetReceipts } from '../src/receipts.js'
 import {
   $,
@@ -57,6 +58,7 @@ const MODEL_REPLY = {
 // rather than stepping around it.
 async function fakeApi({ seed = [] } = {}) {
   forgetGroupKeys()
+  await forgetLocalLedger()
   forgetReceipts()
   const device = await generateDeviceKey()
   await saveDeviceKey(device)
@@ -80,14 +82,18 @@ async function fakeApi({ seed = [] } = {}) {
       }
       payload.receipts = ids
     }
-    encSeed.push({ ...e, payload: { enc: await encryptPayload(key, payload) } })
+    encSeed.push({
+      event_id: e.event_id ?? `seed-${e.id}`,
+      ...e,
+      payload: { enc: await encryptPayload(key, payload) },
+    })
   }
 
   const state = {
     key,
     events: [
-      { id: 1, type: 'member.added', payload: { user_id: 1, display_name: 'v' } },
-      { id: 2, type: 'member.added', payload: { user_id: 2, display_name: 'd' } },
+      { id: 1, event_id: 'm1', type: 'member.added', payload: { user_id: 1, display_name: 'v' } },
+      { id: 2, event_id: 'm2', type: 'member.added', payload: { user_id: 2, display_name: 'd' } },
       ...encSeed,
     ],
     posted: [],
@@ -140,7 +146,13 @@ async function fakeApi({ seed = [] } = {}) {
       const plain = await decryptPayload(state.key, body.payload.enc)
       state.posted.push({ ...body, payload: plain })
       const id = (state.events.at(-1)?.id ?? 0) + 1
-      state.events.push({ id, type: body.type, payload: body.payload, author: 1 })
+      state.events.push({
+        id,
+        event_id: body.event_id,
+        type: body.type,
+        payload: body.payload,
+        author: 1,
+      })
       return json({ id })
     }
     // Reviving mints a key for the new group and seals it to this device and
@@ -193,8 +205,13 @@ async function fakeApi({ seed = [] } = {}) {
 }
 
 const opened = []
-const open = (ai = AI) =>
-  mount(
+// Drain the previous view before clearing the store, not after: a sync still
+// in flight would otherwise write into a ledger the next test just emptied,
+// which showed up as receipts tests passing in one run and failing in the next.
+const open = async (ai = AI) => {
+  await unmount()
+  await forgetLocalLedger()
+  return mount(
     <GroupView
       groupId={7}
       me={{ id: 1, display_name: 'v' }}
@@ -203,6 +220,7 @@ const open = (ai = AI) =>
       onOpen={(id) => opened.push(id)}
     />
   )
+}
 
 const addForm = () => byText('h3', 'Add an expense')?.closest('form')
 const descriptionField = () => addForm().querySelector('input')
@@ -429,7 +447,12 @@ describe('what actually crosses the wire', () => {
             ...body,
             events: [
               ...body.events,
-              { id: 99, type: 'expense.created', payload: { enc: 'AAAA.BBBB' } },
+              {
+                id: 99,
+                event_id: 'undecryptable',
+                type: 'expense.created',
+                payload: { enc: 'AAAA.BBBB' },
+              },
             ],
           }),
         }
@@ -490,6 +513,7 @@ describe('recovering an account, from the group side', () => {
     // itself, in the clear, which is what lets it enforce claiming-once.
     api.events.push({
       id: 5,
+      event_id: 'claim-5',
       type: 'member.added',
       payload: { user_id: 3, display_name: 'd-again', claims: 2 },
     })
@@ -738,6 +762,7 @@ describe('when you are no longer part of the group', () => {
     const api = await fakeApi()
     api.events.push({
       id: 3,
+      event_id: 'claim-3',
       type: 'member.added',
       payload: { user_id: 3, display_name: 'not me', claims: 1 },
     })

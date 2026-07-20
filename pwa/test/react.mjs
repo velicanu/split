@@ -11,13 +11,32 @@ import { createRoot } from 'react-dom/client'
 // a component holding an interval would otherwise keep the process alive.
 let current = null
 
-// Effects now await IndexedDB and libsodium, which resolve on macrotasks —
-// act() alone returns before those settle, leaving the component mid-load.
-// Every interaction helper ends with this so assertions see a settled UI.
+// Effects await IndexedDB and libsodium, which resolve on macrotasks — act()
+// alone returns before those settle, leaving the component mid-load. Every
+// interaction helper ends with this so assertions see a settled UI.
+//
+// Waits for the DOM to stop changing rather than flushing a fixed number of
+// turns. It used to flush five, which was enough until reads went through the
+// local ledger — open the database, read, decrypt, sync, re-read — and then
+// every affected test failed with "no element to interact with", which reads
+// like a missing element rather than an impatient helper. A count would just
+// need raising again next time.
+// The threshold has to clear a whole IndexedDB round trip — open, read,
+// decrypt, re-render — because during one the DOM sits still and "still" is
+// indistinguishable from "finished". At three, settle() returned mid-load and
+// every test that touched the local ledger saw an empty group.
+const QUIET_TURNS = 15
+const MAX_TURNS = 400
+
 export const settle = () =>
   act(async () => {
-    for (let i = 0; i < 5; i += 1) {
+    let quiet = 0
+    let previous = document.body.innerHTML
+    for (let i = 0; i < MAX_TURNS && quiet < QUIET_TURNS; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0))
+      const now = document.body.innerHTML
+      quiet = now === previous ? quiet + 1 : 0
+      previous = now
     }
   })
 

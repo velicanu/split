@@ -11,6 +11,7 @@
 import { api } from './api'
 import { adoptApiKeysForNewDevice } from './aikeys'
 import { adoptGroupsForNewDevice, forgetGroupKeys } from './groupkeys'
+import { forgetLocalLedger } from './store'
 import {
   forgetDeviceKey,
   generateAccountKey,
@@ -135,4 +136,8 @@ export async function logout() {
   await api('logout', {})
   await forgetDeviceKey()
   forgetGroupKeys()
+  // The local ledger goes too. It outlives the credentials that justified it
+  // otherwise — and on a shared computer that is the whole group's history
+  // sitting there after someone thought they had left.
+  await forgetLocalLedger()
 }

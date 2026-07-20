@@ -9,6 +9,13 @@ import sodium from 'libsodium-wrappers-sumo'
 
 import { changePassword, enrol, logout, resume, signup } from '../src/auth.js'
 import {
+  forgetLocalLedger,
+  localEvents,
+  localGroupKey,
+  saveGroupKey,
+} from '../src/store.js'
+import { append } from '../src/sync.js'
+import {
   forgetDeviceKey,
   loadDeviceKey,
   saveDeviceKey,
@@ -153,6 +160,7 @@ function fakeServer() {
 afterEach(async () => {
   localStorage.clear()
   await forgetDeviceKey()
+  await forgetLocalLedger()
 })
 
 describe('signing up', () => {
@@ -289,6 +297,23 @@ describe('signing out', () => {
 
     const after = await loadDeviceKey()
     assert.notEqual(after.pubkey, before.pubkey)
+  })
+
+  test('takes the local ledger with it', async () => {
+    // The offline copy holds the group key and the group's history. Leaving it
+    // on a shared computer after someone has logged out would hand over the
+    // whole split, which is the same failure logging out just fixed for the
+    // device key. See plan/04.
+    fakeServer()
+    await signup({ login_handle: 'ledger-user', display_name: 'L', password: 'pw' })
+    await saveGroupKey(7, 'a-group-key')
+    await append(7, { event_id: 'e1', type: 'expense.created', payload: { enc: 'x' } })
+    assert.equal((await localEvents(7)).length, 1, 'the setup stored something')
+
+    await logout()
+
+    assert.deepEqual(await localEvents(7), [], 'the log is gone')
+    assert.ok(!(await localGroupKey(7)), 'and so is the key that opened it')
   })
 
   test('other devices are untouched', async () => {

@@ -11,6 +11,7 @@ import {
   sealTo,
 } from './crypto.js'
 import { forgetGroupKeys } from './groupkeys.js'
+import { forgetLocalLedger } from './store.js'
 import { fetchReceipt, forgetReceipts, uploadReceipt } from './receipts.js'
 
 // What the canvas stub in test/setup.mjs produces: base64 'QUFB' -> 'AAA'.
@@ -18,6 +19,7 @@ const PLAINTEXT = [65, 65, 65]
 
 async function serve() {
   forgetGroupKeys()
+  await forgetLocalLedger()
   forgetReceipts()
   const device = await generateDeviceKey()
   await saveDeviceKey(device)
