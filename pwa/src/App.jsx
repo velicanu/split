@@ -15,15 +15,7 @@ import {
 } from './ledger'
 import { PROVIDERS, extractReceipt } from './ai'
 import { api } from './api'
-import {
-  changePassword,
-  enrol,
-  enrolledHere,
-  logout as signOut,
-  resume,
-  signBackIn,
-  signup,
-} from './auth'
+import { changePassword, enrol, logout as signOut, resume, signup } from './auth'
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
@@ -100,29 +92,6 @@ function Auth({ onAuth }) {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  // Signing out does not un-enrol this browser, so coming back needs no
-  // password — only the deliberate act that signing out asked for.
-  const [stillEnrolled, setStillEnrolled] = useState(false)
-
-  useEffect(() => {
-    enrolledHere().then(setStillEnrolled).catch(() => {})
-  }, [])
-
-  async function back() {
-    setError('')
-    setBusy(true)
-    try {
-      const me = await signBackIn()
-      // The key is gone or the server no longer knows it — most likely this
-      // device was revoked from somewhere else. Fall through to the form.
-      if (!me) return setStillEnrolled(false)
-      onAuth(me)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setBusy(false)
-    }
-  }
 
   async function submit(e) {
     e.preventDefault()
@@ -151,17 +120,6 @@ function Auth({ onAuth }) {
   return (
     <main>
       <h1>Split</h1>
-      {stillEnrolled && (
-        <div className="resume">
-          <button onClick={back} disabled={busy}>
-            {busy ? 'working…' : 'Sign back in on this device'}
-          </button>
-          <p className="muted">
-            This browser is still enrolled, so there is nothing to type. Sign
-            in as someone else below, or revoke it from your devices list.
-          </p>
-        </div>
-      )}
       <form onSubmit={submit}>
         <input
           placeholder="handle"
@@ -255,8 +213,9 @@ function Home({ user, onLogout }) {
   }, [pendingInvite])
 
   async function logout() {
-    // Ends the session but keeps this device's key: it's still enrolled, so
-    // signing back in needs no password. Revoking is the deliberate act.
+    // Un-enrols this browser as well as ending the session: the device key
+    // alone can sign in, so anything less would leave a shared computer signed
+    // in for whoever sits down next. Coming back needs the password.
     await signOut()
     onLogout()
   }
@@ -528,18 +487,17 @@ function Devices() {
     }
   }
 
-  const live = (devices || []).filter((d) => !d.revoked_at)
-
   return (
     <section>
       <h3>Devices</h3>
       <p className="muted">
-        Lost a device? Revoke it here and it loses access immediately. It keeps
-        anything it had already downloaded — that can&rsquo;t be undone.
+        Lost a device? Revoke it here and it loses access immediately, and
+        drops off this list. It keeps anything it had already downloaded —
+        that can&rsquo;t be undone.
       </p>
       {devices === null && <p className="muted">Loading…</p>}
       <ul className="list">
-        {live.map((d) => (
+        {(devices || []).map((d) => (
           <li key={d.id} className="row static">
             <div className="expense">
               <span>
