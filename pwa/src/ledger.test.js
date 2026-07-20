@@ -1055,3 +1055,56 @@ describe('claiming a ghost', () => {
     )
   })
 })
+
+describe('a member can only be claimed once', () => {
+  const ghost = (member_id, display_name) =>
+    ev('member.ghost_added', { member_id, display_name })
+  const merged = (old_member_id, new_member_id) =>
+    ev('member.merged', { old_member_id, new_member_id })
+
+  test('the first claim wins and the second is ignored', () => {
+    // An invite link names a member to become. Used twice, the second person
+    // would otherwise displace the first, who would become a member with no
+    // history and no sign of what happened.
+    const state = computeState([
+      member(1, 'v'),
+      ghost(-100, 'Fran'),
+      expense('e1', {
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: -100, share_cents: 500 },
+        ],
+      }),
+      member(2, 'Fran'),
+      merged(-100, 2),
+      member(3, 'impostor'),
+      merged(-100, 3),
+    ])
+    assert.equal(netOf(state, 2), -500, 'the first claimant kept the history')
+    assert.equal(netOf(state, 3), 0, 'the second got nothing')
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 2, 3]
+    )
+  })
+
+  test('chains still work, because a target is not a claimed id', () => {
+    // Losing an account twice: 2 -> 3 -> 4. The second merge names 3 as the
+    // one being claimed, and 3 was previously a target, not a claim.
+    const state = computeState([
+      member(1, 'v'),
+      member(2, 'd'),
+      expense('e1'),
+      member(3, 'd-again'),
+      merged(2, 3),
+      member(4, 'd-third'),
+      merged(3, 4),
+    ])
+    assert.equal(netOf(state, 4), -500)
+    assert.deepEqual(
+      state.members.map((m) => m.id),
+      [1, 4]
+    )
+  })
+})

@@ -636,3 +636,57 @@ describe('someone not using the app', () => {
     assert.equal(api.posted.filter((e) => e.type === 'member.ghost_added').length, 0)
   })
 })
+
+describe('inviting someone', () => {
+  const inviteForm = () => byText('h4', 'Invite someone')?.closest('form')
+
+  test('creates a ghost and a link that names them', async () => {
+    const api = await fakeApi()
+    await open()
+
+    await change(inviteForm().querySelector('input'), 'Fran')
+    await submit(inviteForm())
+
+    // The ghost exists immediately, so the group can split with Fran whether
+    // or not she ever accepts.
+    const ghost = api.posted.find((e) => e.type === 'member.ghost_added')
+    assert.ok(ghost)
+    assert.equal(ghost.payload.display_name, 'Fran')
+
+    const link = $('.invite').value
+    assert.ok(link.includes('#join='), 'carries the group')
+    assert.ok(link.includes('gk='), 'carries the key')
+    assert.ok(
+      link.includes(`as=${encodeURIComponent(ghost.payload.member_id)}`),
+      'and says who to become'
+    )
+    assert.ok(text().includes('makes whoever opens it'))
+  })
+
+  test('an existing ghost can be invited without making another', async () => {
+    const api = await fakeApi()
+    await open()
+    // One ghost, added without an invite.
+    const addForm = byText('h4', 'Someone not using the app')?.closest('form')
+    await change(addForm.querySelector('input'), 'Sam')
+    await submit(addForm)
+    const before = api.posted.filter((e) => e.type === 'member.ghost_added').length
+
+    await click(byText('button', 'Sam'))
+
+    const after = api.posted.filter((e) => e.type === 'member.ghost_added').length
+    assert.equal(after, before, 'no duplicate ghost was created')
+    const ghostId = api.posted.find((e) => e.type === 'member.ghost_added')
+      .payload.member_id
+    assert.ok($('.invite').value.includes(`as=${encodeURIComponent(ghostId)}`))
+  })
+
+  test('refuses a nameless invite before creating anything', async () => {
+    const api = await fakeApi()
+    await open()
+    await submit(inviteForm())
+    assert.ok(text().includes('Give them a name'))
+    assert.equal(api.posted.filter((e) => e.type === 'member.ghost_added').length, 0)
+    assert.equal($('.invite'), null)
+  })
+})

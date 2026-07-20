@@ -49,6 +49,27 @@ When the last member leaves, the group is genuinely gone: the server deletes the
 group, its events, its receipts and its wrapped keys. Membership count reaching
 zero is one of the few rules the server can enforce without reading anything.
 
+## Invites name a member
+
+An invite link says *who to become*: `#join=<code>&gk=<key>&as=<member_id>`.
+Accepting it joins the group and claims that member in one act, so there is no
+window in which someone else could claim the ghost first, and nobody has to
+remember to do it afterwards.
+
+Hitting **invite** always produces a member to become. If you are inviting
+someone already in the split, it is their existing ghost; otherwise a ghost is
+created for them there and then, which means the group can split with them
+before they ever accept.
+
+**A member can only be claimed once** — the first merge naming it wins, later
+ones are ignored. A link used twice would otherwise let the second person
+silently displace the first, who would be left a member with no history and no
+indication why. This does not affect recovery chains (`2 → 3` then `3 → 4`),
+because a merge *target* is not itself a claimed id.
+
+The `member.merged` event is unchanged, and remains available as the corrective
+path when someone has already joined and needs attaching afterwards.
+
 ## Claiming a ghost
 
 Someone who joins can be attached to an existing ghost — the ghost's history

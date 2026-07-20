@@ -163,6 +163,10 @@ export function computeState(events) {
       // A clean slate only. Otherwise claiming a ghost who is owed money would
       // cancel the claimer's own debt with someone else's credit.
       if (active.has(p.new_member_id)) continue
+      // First claim wins. An invite link names a member to become, so a link
+      // used twice would otherwise let the second person silently displace the
+      // first — who would then be a member with no history and no sign of why.
+      if (alias.has(p.old_member_id)) continue
       alias.set(p.old_member_id, p.new_member_id)
     } else if (e.type === 'comment.created' || e.type === 'comment.updated') {
       const p = e.payload

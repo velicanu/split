@@ -197,8 +197,7 @@ function Home({ user, onLogout }) {
     let cancelled = false
     ;(async () => {
       try {
-        const g = await api('groups/join', { code: pendingInvite.code })
-        await publishGroupKey(g.id, pendingInvite.gk)
+        const g = await acceptInvite(pendingInvite)
         if (!cancelled) setGroupId(g.id)
       } catch {
         // Already a member, or a stale link — the groups list still works.
@@ -523,14 +522,41 @@ function Devices() {
 
 // The link carries the group key in its fragment, so it is a secret in a way
 // the old invite code was not.
-function InviteLink({ groupId, code }) {
+// Inviting someone is inviting them to *be* a particular member. If they are
+// not in the group yet, a ghost is created for them first, so people can start
+// splitting with them before they accept. See plan/12.
+function InviteLink({ groupId, code, members, onAddGhost }) {
   const [link, setLink] = useState('')
+  const [forMember, setForMember] = useState(null)
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [error, setError] = useState('')
 
-  async function reveal() {
+  const show = async (memberId, label) => {
     const key = await groupKey(groupId)
     if (!key) return
-    setLink(buildInviteLink(window.location.origin, code, key))
+    setForMember(label)
+    setLink(buildInviteLink(window.location.origin, code, key, memberId))
+    setCopied(false)
+  }
+
+  async function inviteSomeoneNew(e) {
+    e.preventDefault()
+    setError('')
+    if (!name.trim()) return setError('Give them a name')
+    setBusy(true)
+    try {
+      // The ghost exists from this moment, so the group can split with them
+      // whether or not they ever accept.
+      const memberId = await onAddGhost(name.trim())
+      await show(memberId, name.trim())
+      setName('')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function copy() {
@@ -542,23 +568,55 @@ function InviteLink({ groupId, code }) {
     }
   }
 
-  if (!link) {
-    return (
-      <button className="link" onClick={reveal}>
-        show invite link
-      </button>
-    )
-  }
+  const ghosts = (members ?? []).filter((m) => m.ghost)
+
   return (
     <div>
-      <p className="muted">
-        Anyone with this link can read the group — it contains the key. Send it
-        somewhere private.
-      </p>
-      <input className="invite" readOnly value={link} onFocus={(e) => e.target.select()} />
-      <button className="link" onClick={copy}>
-        {copied ? 'copied' : 'copy'}
-      </button>
+      <form onSubmit={inviteSomeoneNew}>
+        <h4>Invite someone</h4>
+        <input
+          placeholder="their name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <button type="submit" disabled={busy}>
+          {busy ? 'working…' : 'Create their invite'}
+        </button>
+        {error && <p className="error">{error}</p>}
+      </form>
+
+      {ghosts.length > 0 && (
+        <p className="muted">
+          Or invite someone already in the split:{' '}
+          {ghosts.map((m) => (
+            <button
+              key={m.id}
+              className="link"
+              onClick={() => show(m.id, m.display_name)}
+            >
+              {m.display_name}
+            </button>
+          ))}
+        </p>
+      )}
+
+      {link && (
+        <div>
+          <p className="muted">
+            This link makes whoever opens it <strong>{forMember}</strong>, and
+            hands over the group key. It works once. Send it somewhere private.
+          </p>
+          <input
+            className="invite"
+            readOnly
+            value={link}
+            onFocus={(e) => e.target.select()}
+          />
+          <button className="link" onClick={copy}>
+            {copied ? 'copied' : 'copy'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -588,6 +646,38 @@ function ReceiptThumb({ groupId, receiptId }) {
       <img className="receipt-thumb" src={url} alt="receipt" />
     </a>
   )
+}
+
+/** Accept an invite: join, take the group key from the link, and — if the link
+ *  named a member to become — claim that member's history.
+ *
+ *  Claiming here rather than as a later step means accepting an invite and
+ *  taking over the ghost are one act, so there is no window in which the wrong
+ *  person could claim it. See plan/12. */
+async function acceptInvite(invite) {
+  const g = await api('groups/join', { code: invite.code })
+  // The key came from the URL fragment, which the server never saw; seal it to
+  // this account and device so it survives.
+  await publishGroupKey(g.id, invite.gk)
+
+  if (invite.member_id) {
+    const me = await api('me')
+    const key = await groupKey(g.id)
+    if (key) {
+      await api(`groups/${g.id}/events`, {
+        event_id: crypto.randomUUID(),
+        type: 'member.merged',
+        payload: {
+          enc: await encryptPayload(key, {
+            old_member_id: invite.member_id,
+            new_member_id: me.id,
+            updated_at: Date.now(),
+          }),
+        },
+      })
+    }
+  }
+  return g
 }
 
 // A person in the split who isn't in the app. They pay, they owe, they settle
@@ -796,10 +886,7 @@ function GroupList({ onOpen }) {
       return setError('Paste the whole invite link — it carries the group key')
     }
     try {
-      const g = await api('groups/join', { code: invite.code })
-      // Seal the key from the link to this account and device; the server
-      // never saw it and could not have given it to us.
-      await publishGroupKey(g.id, invite.gk)
+      const g = await acceptInvite(invite)
       setCode('')
       onOpen(g.id)
     } catch (err) {
@@ -1000,12 +1087,18 @@ export function GroupView({ groupId, me, ai, onBack }) {
   // Someone who splits expenses with the group but doesn't use the app.
   // Negative ids so they can never collide with a server-issued user id, and
   // still numbers so the split maths keeps working. See plan/12.
-  const addGhost = (display_name) =>
-    appendEvent('member.ghost_added', {
-      member_id: -(Math.floor(Math.random() * 2 ** 45) + 1),
+  const addGhost = async (display_name) => {
+    const member_id = -(Math.floor(Math.random() * 2 ** 45) + 1)
+    await appendEvent('member.ghost_added', {
+      member_id,
       display_name,
       updated_at: Date.now(),
-    }).then(pull)
+    })
+    await pull()
+    // Returned so an invite can name them: inviting someone is inviting them
+    // to be this member.
+    return member_id
+  }
 
   const mergeMembers = (old_member_id, new_member_id) =>
     appendEvent('member.merged', {
@@ -1095,7 +1188,12 @@ export function GroupView({ groupId, me, ai, onBack }) {
           log
         </button>
       </p>
-      <InviteLink groupId={groupId} code={meta.code} />
+      <InviteLink
+        groupId={groupId}
+        code={meta.code}
+        members={state.members}
+        onAddGhost={addGhost}
+      />
       {showLog && (
         <LedgerLog
           group={{ id: groupId, name: meta.name }}
