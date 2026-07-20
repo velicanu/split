@@ -7,10 +7,11 @@ import { afterEach, describe, test } from 'node:test'
 
 import sodium from 'libsodium-wrappers-sumo'
 
-import { changePassword, enrol, resume, signup } from '../src/auth.js'
+import { changePassword, enrol, logout, resume, signup } from '../src/auth.js'
 import {
   forgetDeviceKey,
   loadDeviceKey,
+  saveDeviceKey,
   unwrapAccountKey,
   wrapAccountKey,
 } from '../src/crypto.js'
@@ -22,6 +23,7 @@ function fakeServer() {
     devices: {},
     wraps: {},
     session: null,
+    sessionDevice: null,
     challenges: {},
     // group id -> [{recipient_kind, recipient_id, ciphertext}]
     groupKeys: {},
@@ -51,6 +53,7 @@ function fakeServer() {
         revoked: false,
       }
       state.session = body.login_handle
+      state.sessionDevice = body.device_pubkey
       return json({ ok: true })
     }
     if (path.startsWith('wraps?')) {
@@ -81,6 +84,7 @@ function fakeServer() {
       )
       if (!ok) return fail(401, 'authentication failed')
       state.session = device.handle
+      state.sessionDevice = body.device_pubkey
       return json({ ok: true })
     }
     if (path === 'devices' && options?.method !== 'DELETE') {
@@ -133,6 +137,11 @@ function fakeServer() {
       })
     }
     if (path === 'logout') {
+      // Logging out un-enrols the device, exactly as the server does. A fake
+      // that only dropped the session would let the client look safe while
+      // leaving a browser anyone could sign back in on.
+      delete state.devices[state.sessionDevice]
+      state.sessionDevice = null
       state.session = null
       return json({ ok: true })
     }
@@ -141,7 +150,10 @@ function fakeServer() {
   return state
 }
 
-afterEach(forgetDeviceKey)
+afterEach(async () => {
+  localStorage.clear()
+  await forgetDeviceKey()
+})
 
 describe('signing up', () => {
   test('keeps a device key locally and sends only public material', async () => {
@@ -200,7 +212,7 @@ describe('resuming on a device that already has a key', () => {
     const server = fakeServer()
     await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
     const device = await loadDeviceKey()
-    server.devices[device.pubkey].revoked = true
+    delete server.devices[device.pubkey]
 
     assert.equal(await resume(), null)
     assert.equal(
@@ -213,6 +225,86 @@ describe('resuming on a device that already has a key', () => {
   test('returns null on a device that has never enrolled', async () => {
     fakeServer()
     assert.equal(await resume(), null)
+  })
+})
+
+describe('signing out', () => {
+  // The bug this replaced: logging out ended the session but kept the device
+  // key, and the key alone signs the challenge. So a refresh signed you back
+  // in — and on a shared computer, so did whoever sat down next.
+  //
+  // Logging out therefore un-enrols the browser. Getting back in needs the
+  // password, the same as anywhere else.
+  test('forgets this device\u2019s key', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await logout()
+    assert.equal(await loadDeviceKey(), null)
+  })
+
+  test('so a refresh does not sign you back in', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await logout()
+    assert.equal(await resume(), null)
+  })
+
+  test('and the server will not take the old key either', async () => {
+    // The property that actually protects a public computer: forgetting the
+    // key locally is not enough on its own, because a copy taken beforehand
+    // would still work. The device has to be gone server-side.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    const stolen = await loadDeviceKey()
+    await logout()
+
+    // Someone puts the key back \u2014 an extension, a backup, devtools.
+    await saveDeviceKey(stolen)
+    assert.equal(await resume(), null, 'the server no longer knows this device')
+    assert.equal(await loadDeviceKey(), null, 'and the dead key is dropped')
+    assert.ok(!server.devices[stolen.pubkey])
+  })
+
+  test('getting back in needs the password', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'distinct-pw' })
+    await logout()
+
+    await assert.rejects(
+      () => enrol({ login_handle: 'v', password: 'wrong' }),
+      /password|handle/i
+    )
+    assert.equal(
+      (await enrol({ login_handle: 'v', password: 'distinct-pw' }))?.login_handle,
+      'v'
+    )
+  })
+
+  test('coming back mints a new device rather than reviving the old one', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'distinct-pw' })
+    const before = await loadDeviceKey()
+    await logout()
+    await enrol({ login_handle: 'v', password: 'distinct-pw' })
+
+    const after = await loadDeviceKey()
+    assert.notEqual(after.pubkey, before.pubkey)
+  })
+
+  test('other devices are untouched', async () => {
+    // Signing out of a library computer must not sign you out of your phone.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'distinct-pw' })
+    const phone = await loadDeviceKey()
+
+    // A second browser enrols, then signs out.
+    await forgetDeviceKey()
+    await enrol({ login_handle: 'v', password: 'distinct-pw' })
+    await logout()
+
+    assert.ok(server.devices[phone.pubkey], 'the phone is still enrolled')
+    await saveDeviceKey(phone)
+    assert.equal((await resume())?.login_handle, 'v')
   })
 })
 

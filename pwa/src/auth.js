@@ -122,9 +122,17 @@ export async function changePassword({ login_handle, current, next }) {
   await api('wraps', { wraps: [await wrapAccountKey(account, next)] }, 'PUT')
 }
 
+/** Log out, which means un-enrolling this browser.
+ *
+ *  The device key alone can sign the server's challenge, so a browser that
+ *  keeps its key after logging out is one that anyone can walk up to and sign
+ *  back in on. Keeping it was the earlier design and it was wrong: on a shared
+ *  computer "log out" has to mean it.
+ *
+ *  The server deletes the device; this drops the key that would have proved
+ *  ownership of it. Getting back in needs the password, via enrol(). */
 export async function logout() {
   await api('logout', {})
+  await forgetDeviceKey()
   forgetGroupKeys()
-  // The device key stays: this browser is still an enrolled device, so signing
-  // back in needs no password. Revoking is the deliberate, separate act.
 }

@@ -213,8 +213,9 @@ function Home({ user, onLogout }) {
   }, [pendingInvite])
 
   async function logout() {
-    // Ends the session but keeps this device's key: it's still enrolled, so
-    // signing back in needs no password. Revoking is the deliberate act.
+    // Un-enrols this browser as well as ending the session: the device key
+    // alone can sign in, so anything less would leave a shared computer signed
+    // in for whoever sits down next. Coming back needs the password.
     await signOut()
     onLogout()
   }
@@ -486,18 +487,17 @@ function Devices() {
     }
   }
 
-  const live = (devices || []).filter((d) => !d.revoked_at)
-
   return (
     <section>
       <h3>Devices</h3>
       <p className="muted">
-        Lost a device? Revoke it here and it loses access immediately. It keeps
-        anything it had already downloaded — that can&rsquo;t be undone.
+        Lost a device? Revoke it here and it loses access immediately, and
+        drops off this list. It keeps anything it had already downloaded —
+        that can&rsquo;t be undone.
       </p>
       {devices === null && <p className="muted">Loading…</p>}
       <ul className="list">
-        {live.map((d) => (
+        {(devices || []).map((d) => (
           <li key={d.id} className="row static">
             <div className="expense">
               <span>

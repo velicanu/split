@@ -27,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def reset_if_stale(conn):
@@ -84,9 +84,11 @@ def init_db():
             " ciphertext TEXT NOT NULL,"
             " PRIMARY KEY (user_id, method))"
         )
-        # One row per device. Revoking sets revoked_at: the device can no longer
-        # authenticate, and — because it only ever held its own key — cannot
-        # enrol a replacement either.
+        # One row per device. Revoking — and logging out, which is the same
+        # act — deletes the row: the device can no longer authenticate, and
+        # because it only ever held its own key it cannot enrol a replacement
+        # either. Deleted rather than tombstoned, so nobody accumulates a list
+        # of every browser they have ever signed out of.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS devices ("
             " id TEXT PRIMARY KEY,"
@@ -94,8 +96,7 @@ def init_db():
             " pubkey TEXT UNIQUE NOT NULL,"
             " box_pubkey TEXT NOT NULL,"
             " label TEXT NOT NULL,"
-            " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
-            " revoked_at TEXT)"
+            " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
         )
         # A group's symmetric key, sealed to one recipient. The server relays
         # these without being able to open any of them: sealing is anonymous
@@ -329,7 +330,7 @@ def current_user(request: Request):
             " FROM sessions s"
             " JOIN users u ON u.id = s.user_id"
             " JOIN devices d ON d.id = s.device_id"
-            " WHERE s.token = ? AND d.revoked_at IS NULL",
+            " WHERE s.token = ?",
             (token,),
         ).fetchone()
 
@@ -368,7 +369,7 @@ def auth_verify(body: VerifyIn, response: Response):
     with db() as conn:
         fresh = take_challenge(conn, body.nonce, body.device_pubkey)
         device = conn.execute(
-            "SELECT id, user_id FROM devices WHERE pubkey = ? AND revoked_at IS NULL",
+            "SELECT id, user_id FROM devices WHERE pubkey = ?",
             (body.device_pubkey,),
         ).fetchone()
     if not fresh or not device:
@@ -451,7 +452,7 @@ def list_devices(request: Request):
     user = require_user(request)
     with db() as conn:
         rows = conn.execute(
-            "SELECT id, label, box_pubkey, created_at, revoked_at FROM devices"
+            "SELECT id, label, box_pubkey, created_at FROM devices"
             " WHERE user_id = ? ORDER BY created_at",
             (user["id"],),
         ).fetchall()
@@ -478,7 +479,7 @@ def add_device(body: DeviceIn, request: Request, response: Response):
             # A revoked device must not be able to enrol a replacement — that is
             # the whole point of revoking it.
             signer = conn.execute(
-                "SELECT user_id FROM devices WHERE pubkey = ? AND revoked_at IS NULL",
+                "SELECT user_id FROM devices WHERE pubkey = ?",
                 (body.signer_pubkey,),
             ).fetchone()
         if not signer or not verify_sig(
@@ -509,11 +510,10 @@ def revoke_device(device_id: str, request: Request):
         ).fetchone()
         if not row:
             raise HTTPException(404, "device not found")
-        conn.execute(
-            "UPDATE devices SET revoked_at = datetime('now')"
-            " WHERE id = ? AND revoked_at IS NULL",
-            (device_id,),
-        )
+        # Deleted, not tombstoned: a device that is gone fails every check a
+        # revoked one would have, and nobody wants to scroll a list of browsers
+        # they no longer use.
+        conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
         # Drop its sessions too, so revocation takes effect on the next request
         # rather than whenever its cookie happens to expire.
         conn.execute("DELETE FROM sessions WHERE device_id = ?", (device_id,))
@@ -522,9 +522,27 @@ def revoke_device(device_id: str, request: Request):
 
 @app.post("/api/logout")
 def logout(request: Request, response: Response):
+    """Log out, which means un-enrolling this device.
+
+    A device key alone can sign the challenge, so a browser that keeps its key
+    after logging out is a browser anyone can walk up to and sign back in on.
+    Logging out therefore deletes the device outright: getting back in needs
+    the password, the same as anywhere else.
+
+    The row is deleted rather than marked revoked. Nobody wants a list of every
+    browser they have ever signed out of, and a device that is gone fails every
+    check a revoked one would have."""
     token = request.cookies.get(COOKIE)
     if token:
         with db() as conn:
+            row = conn.execute(
+                "SELECT device_id FROM sessions WHERE token = ?", (token,)
+            ).fetchone()
+            if row:
+                conn.execute("DELETE FROM devices WHERE id = ?", (row["device_id"],))
+                conn.execute(
+                    "DELETE FROM sessions WHERE device_id = ?", (row["device_id"],)
+                )
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
     response.delete_cookie(COOKIE)
     return {"ok": True}
@@ -780,7 +798,7 @@ def get_group_keys(group_id: int, request: Request):
         devices = [
             r["id"]
             for r in conn.execute(
-                "SELECT id FROM devices WHERE user_id = ? AND revoked_at IS NULL",
+                "SELECT id FROM devices WHERE user_id = ?",
                 (user["id"],),
             ).fetchall()
         ]

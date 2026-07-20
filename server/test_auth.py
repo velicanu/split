@@ -72,11 +72,53 @@ def test_signup_then_sign_in_by_signature():
     c, _, (dev_priv, dev_pub) = enrolled("sig-user", "Sig User")
     assert c.get("/api/me").json()["display_name"] == "Sig User"
 
+    # A session can be re-established from the device key alone, without a
+    # password — that is the whole point of enrolling a device.
+    assert sign_in(c, dev_priv, dev_pub).status_code == 200
+    assert c.get("/api/me").json()["login_handle"] == "sig-user"
+
+
+def test_logging_out_un_enrols_the_device():
+    """Logging out has to mean it. The device key alone signs the challenge, so
+    a browser that keeps its enrolment after logging out is one anyone can walk
+    up to and sign back in on. Getting back in needs the password."""
+    c, _, (dev_priv, dev_pub) = enrolled("public-computer")
+
     c.post("/api/logout", json={})
     assert c.get("/api/me").status_code == 401
 
-    assert sign_in(c, dev_priv, dev_pub).status_code == 200
-    assert c.get("/api/me").json()["login_handle"] == "sig-user"
+    # Even holding the device key, which is all authentication ever needed.
+    assert sign_in(c, dev_priv, dev_pub).status_code == 401
+    assert c.get("/api/me").status_code == 401
+
+
+def test_logging_out_leaves_the_accounts_other_devices_alone():
+    """Signing out of a library computer must not sign you out of your phone.
+    Two devices on the *same* account, which is the case that matters."""
+    phone, (acct_priv, acct_pub), (phone_priv, phone_pub) = enrolled("two-devices")
+
+    # A second browser enrols with the account key, as the password path does.
+    lib_priv, lib_pub = keypair()
+    library = client()
+    r = library.post(
+        "/api/devices",
+        json={
+            "pubkey": lib_pub,
+            "box_pubkey": b64(b"box-library"),
+            "label": "library",
+            "signed_by": "account",
+            "signer_pubkey": acct_pub,
+            "signature": b64(acct_priv.sign(lib_pub.encode())),
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert sign_in(library, lib_priv, lib_pub).status_code == 200
+
+    library.post("/api/logout", json={})
+
+    assert sign_in(library, lib_priv, lib_pub).status_code == 401, "the library is out"
+    assert phone.get("/api/me").status_code == 200, "the phone is untouched"
+    assert sign_in(phone, phone_priv, phone_pub).status_code == 200
 
 
 def test_signup_never_stores_password_material():
@@ -126,7 +168,6 @@ def test_garbage_signature_does_not_crash():
 
 def test_a_challenge_is_single_use():
     c, _, (dev_priv, dev_pub) = enrolled("replay")
-    c.post("/api/logout", json={})
     nonce = c.post("/api/auth/challenge", json={"device_pubkey": dev_pub}).json()[
         "nonce"
     ]
@@ -134,8 +175,9 @@ def test_a_challenge_is_single_use():
     body = {"device_pubkey": dev_pub, "nonce": nonce, "signature": sig}
 
     assert c.post("/api/auth/verify", json=body).status_code == 200
-    c.post("/api/logout", json={})
-    # Replaying the captured pair must not work.
+    # Replaying the captured pair must not work. Logging out is not used to set
+    # this up, because logging out now deletes the device outright and the
+    # replay would then fail for the wrong reason.
     assert c.post("/api/auth/verify", json=body).status_code == 401
 
 
@@ -337,20 +379,18 @@ def test_revoking_a_device_cuts_it_off_and_it_cannot_come_back():
 
 
 def test_a_surviving_session_on_a_revoked_device_is_still_refused():
-    """Revoking deletes the device's sessions, so the belt-and-braces check in
-    current_user is normally unreachable. Reach it directly: mark the device
-    revoked while leaving its session row behind, which is what a partial
-    failure or a future code path that forgets to clean up would look like."""
+    """Revoking deletes the device's sessions, so this is normally unreachable.
+    Reach it directly: delete the device while leaving its session row behind,
+    which is what a partial failure or a future code path that forgets to clean
+    up would look like. `current_user` joins through devices, so a session
+    pointing at a device that no longer exists resolves to nobody."""
     import sqlite3
 
     c, _, (_, dev_pub) = enrolled("belt-and-braces")
     assert c.get("/api/me").status_code == 200
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "UPDATE devices SET revoked_at = datetime('now') WHERE pubkey = ?",
-        (dev_pub,),
-    )
+    conn.execute("DELETE FROM devices WHERE pubkey = ?", (dev_pub,))
     conn.commit()
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] > 0
 
@@ -658,3 +698,36 @@ def test_a_revoked_device_stops_receiving_group_keys():
     owner.delete(f"/api/devices/{phone_id}")
     remaining = owner.get(f"/api/groups/{gid}/keys").json()["keys"]
     assert [k["ciphertext"] for k in remaining] == ["sealed"]
+
+
+def test_logging_out_leaves_no_session_rows_behind():
+    """A device can hold more than one session — signing in again after the
+    cookie is cleared mints a second. Deleting the device makes the strays
+    inert, because current_user joins through devices, but leaving rows that
+    can never resolve to anyone is still a leak."""
+    import sqlite3
+
+    c, _, (dev_priv, dev_pub) = enrolled("many-sessions")
+    assert sign_in(c, dev_priv, dev_pub).status_code == 200
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    device_id = conn.execute(
+        "SELECT id FROM devices WHERE pubkey = ?", (dev_pub,)
+    ).fetchone()["id"]
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE device_id = ?", (device_id,)
+        ).fetchone()[0]
+        > 1
+    ), "the setup did not produce a second session"
+
+    c.post("/api/logout", json={})
+
+    conn = sqlite3.connect(DB_PATH)
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE device_id = ?", (device_id,)
+        ).fetchone()[0]
+        == 0
+    )
