@@ -15,7 +15,15 @@ import {
 } from './ledger'
 import { PROVIDERS, extractReceipt } from './ai'
 import { api } from './api'
-import { changePassword, enrol, logout as signOut, resume, signup } from './auth'
+import {
+  changePassword,
+  enrol,
+  enrolledHere,
+  logout as signOut,
+  resume,
+  signBackIn,
+  signup,
+} from './auth'
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
@@ -92,6 +100,29 @@ function Auth({ onAuth }) {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Signing out does not un-enrol this browser, so coming back needs no
+  // password — only the deliberate act that signing out asked for.
+  const [stillEnrolled, setStillEnrolled] = useState(false)
+
+  useEffect(() => {
+    enrolledHere().then(setStillEnrolled).catch(() => {})
+  }, [])
+
+  async function back() {
+    setError('')
+    setBusy(true)
+    try {
+      const me = await signBackIn()
+      // The key is gone or the server no longer knows it — most likely this
+      // device was revoked from somewhere else. Fall through to the form.
+      if (!me) return setStillEnrolled(false)
+      onAuth(me)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function submit(e) {
     e.preventDefault()
@@ -120,6 +151,17 @@ function Auth({ onAuth }) {
   return (
     <main>
       <h1>Split</h1>
+      {stillEnrolled && (
+        <div className="resume">
+          <button onClick={back} disabled={busy}>
+            {busy ? 'working…' : 'Sign back in on this device'}
+          </button>
+          <p className="muted">
+            This browser is still enrolled, so there is nothing to type. Sign
+            in as someone else below, or revoke it from your devices list.
+          </p>
+        </div>
+      )}
       <form onSubmit={submit}>
         <input
           placeholder="handle"

@@ -47,6 +47,9 @@ for (const key of [
   'Node',
   'Event',
   'getComputedStyle',
+  // Signing out has to survive a refresh, so it is recorded here rather than
+  // in memory. See auth.js.
+  'localStorage',
 ]) {
   globalThis[key] = dom.window[key]
 }

@@ -7,7 +7,15 @@ import { afterEach, describe, test } from 'node:test'
 
 import sodium from 'libsodium-wrappers-sumo'
 
-import { changePassword, enrol, resume, signup } from '../src/auth.js'
+import {
+  changePassword,
+  enrol,
+  enrolledHere,
+  logout,
+  resume,
+  signBackIn,
+  signup,
+} from '../src/auth.js'
 import {
   forgetDeviceKey,
   loadDeviceKey,
@@ -141,7 +149,10 @@ function fakeServer() {
   return state
 }
 
-afterEach(forgetDeviceKey)
+afterEach(async () => {
+  localStorage.clear()
+  await forgetDeviceKey()
+})
 
 describe('signing up', () => {
   test('keeps a device key locally and sends only public material', async () => {
@@ -213,6 +224,67 @@ describe('resuming on a device that already has a key', () => {
   test('returns null on a device that has never enrolled', async () => {
     fakeServer()
     assert.equal(await resume(), null)
+  })
+})
+
+describe('signing out', () => {
+  // The bug: logging out ended the session but left the device key, and the
+  // key alone is enough to authenticate. So a refresh signed you straight back
+  // in and logout was indistinguishable from reloading the page.
+  test('survives a refresh', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await logout()
+    assert.equal(await resume(), null, 'a reload must not undo signing out')
+  })
+
+  test('keeps the device enrolled, so coming back needs no password', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await logout()
+
+    assert.ok(await enrolledHere(), 'signing out is not un-enrolling')
+    assert.equal((await signBackIn())?.login_handle, 'v')
+  })
+
+  test('and once back, a refresh keeps you in', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await logout()
+    await signBackIn()
+    assert.equal((await resume())?.login_handle, 'v', 'the decision was undone')
+  })
+
+  test('signing up afterwards clears it too', async () => {
+    // Otherwise the next refresh would throw out an account made seconds ago.
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await logout()
+    await forgetDeviceKey()
+
+    await signup({ login_handle: 'w', display_name: 'W', password: 'pw2' })
+    assert.equal((await resume())?.login_handle, 'w')
+  })
+
+  test('enrolling afterwards clears it too', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'distinct-pw' })
+    await logout()
+    await forgetDeviceKey()
+
+    await enrol({ login_handle: 'v', password: 'distinct-pw' })
+    assert.equal((await resume())?.login_handle, 'v')
+  })
+
+  test('a revoked device cannot sign back in, and its key is dropped', async () => {
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    const device = await loadDeviceKey()
+    await logout()
+    server.devices[device.pubkey].revoked = true
+
+    assert.equal(await signBackIn(), null)
+    assert.equal(await loadDeviceKey(), null)
   })
 })
 

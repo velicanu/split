@@ -23,6 +23,18 @@ import {
 } from './crypto'
 
 
+// Signing out has to outlive a refresh. The device key alone is enough to
+// authenticate, so without a record of the decision, logging out and reloading
+// would put you straight back in — logout would be indistinguishable from a
+// page reload.
+//
+// localStorage rather than the key store: this is a preference about this
+// browser, not key material, and it must be readable before any async work so
+// the app never flashes a signed-in frame on the way to the sign-in screen.
+const SIGNED_OUT = 'split.signed-out'
+
+const isSignedOut = () => localStorage.getItem(SIGNED_OUT) === '1'
+
 const deviceLabel = () => {
   const ua = navigator.userAgent || ''
   const os =
@@ -61,11 +73,11 @@ export async function signup({ login_handle, display_name, password }) {
   // Only stored once the server has accepted it, so a failed signup doesn't
   // leave a key behind that matches no account.
   await saveDeviceKey(device)
+  localStorage.removeItem(SIGNED_OUT)
   return api('me')
 }
 
-/** This device already holds a key. Nothing to type. */
-export async function resume() {
+async function authenticateStoredDevice() {
   const device = await loadDeviceKey()
   if (!device) return null
   try {
@@ -77,6 +89,26 @@ export async function resume() {
     await forgetDeviceKey()
     return null
   }
+}
+
+/** This device already holds a key. Nothing to type — unless the last thing
+ *  that happened here was someone deliberately signing out. */
+export async function resume() {
+  if (isSignedOut()) return null
+  return authenticateStoredDevice()
+}
+
+/** Sign back in on a device that is still enrolled: one click, no password.
+ *  Separate from resume() precisely because it has to be deliberate. */
+export async function signBackIn() {
+  localStorage.removeItem(SIGNED_OUT)
+  return authenticateStoredDevice()
+}
+
+/** Whether this browser still holds a device key, and so can sign back in
+ *  without a password. */
+export async function enrolledHere() {
+  return !!(await loadDeviceKey())
 }
 
 /** Fresh device: unwrap the account key with the password, then use it to
@@ -107,6 +139,7 @@ export async function enrol({ login_handle, password }) {
   // them to the new device key before the account key is dropped.
   await adoptGroupsForNewDevice(account)
   await adoptApiKeysForNewDevice(account)
+  localStorage.removeItem(SIGNED_OUT)
   return api('me')
 }
 
@@ -125,6 +158,8 @@ export async function changePassword({ login_handle, current, next }) {
 export async function logout() {
   await api('logout', {})
   forgetGroupKeys()
-  // The device key stays: this browser is still an enrolled device, so signing
-  // back in needs no password. Revoking is the deliberate, separate act.
+  // Recorded so a refresh does not undo it. The device key stays — this
+  // browser is still enrolled, so signing back in needs no password. Revoking
+  // is the deliberate, separate act.
+  localStorage.setItem(SIGNED_OUT, '1')
 }
