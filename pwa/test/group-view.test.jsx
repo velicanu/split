@@ -11,6 +11,7 @@ import {
   decryptPayload,
   encryptBytes,
   encryptPayload,
+  generateAccountKey,
   generateDeviceKey,
   generateGroupKey,
   saveDeviceKey,
@@ -59,6 +60,7 @@ async function fakeApi({ seed = [] } = {}) {
   forgetReceipts()
   const device = await generateDeviceKey()
   await saveDeviceKey(device)
+  const account = await generateAccountKey()
   const key = await generateGroupKey()
   const sealedKey = await sealTo(device.box_pubkey, key)
 
@@ -91,6 +93,10 @@ async function fakeApi({ seed = [] } = {}) {
     posted: [],
     // Exactly what went over the wire, before any decryption.
     raw: [],
+    // Revive: groups created, events written into them, groups hidden.
+    created: [],
+    revived: [],
+    hidden: [],
     // receipt id -> ciphertext bytes, as the server would hold them
     blobs,
     uploads: 0,
@@ -113,6 +119,14 @@ async function fakeApi({ seed = [] } = {}) {
       return json({ version, events: fresh })
     }
     if (path.includes('/events')) {
+      // A revive writes into a brand-new group whose key this fake never sees
+      // — it is minted on the client and sealed to the device. So those are
+      // counted, not opened. What they *contain* is asserted in revive.test.js,
+      // where the plan can be folded directly.
+      if (!path.includes('/groups/7/')) {
+        state.revived.push(body)
+        return json({ id: state.revived.length })
+      }
       state.raw.push(body)
       // Record the decrypted payload so assertions can read it, but store the
       // ciphertext, so the round trip through the fold is the real one.
@@ -121,6 +135,22 @@ async function fakeApi({ seed = [] } = {}) {
       const id = (state.events.at(-1)?.id ?? 0) + 1
       state.events.push({ id, type: body.type, payload: body.payload, author: 1 })
       return json({ id })
+    }
+    // Reviving mints a key for the new group and seals it to this device and
+    // account, so the fake has to answer both of those.
+    if (path.endsWith('/api/me')) {
+      return json({ id: 1, display_name: 'v', device_id: 'd1' })
+    }
+    if (path.endsWith('/account/box')) {
+      return json({ account_box_pubkey: account.box_pubkey })
+    }
+    if (path.endsWith('/hide')) {
+      state.hidden.push(Number(path.match(/groups\/(\d+)/)[1]))
+      return json({ ok: true, hidden: true })
+    }
+    if (path.endsWith('/api/groups') && body) {
+      state.created.push(body)
+      return json({ id: 8, name: body.name, code: 'new' })
     }
     if (path.endsWith('/keys')) {
       if (body) return json({ ok: true })
@@ -155,8 +185,17 @@ async function fakeApi({ seed = [] } = {}) {
   return state
 }
 
+const opened = []
 const open = (ai = AI) =>
-  mount(<GroupView groupId={7} me={{ id: 1, display_name: 'v' }} ai={ai} onBack={() => {}} />)
+  mount(
+    <GroupView
+      groupId={7}
+      me={{ id: 1, display_name: 'v' }}
+      ai={ai}
+      onBack={() => {}}
+      onOpen={(id) => opened.push(id)}
+    />
+  )
 
 const addForm = () => byText('h3', 'Add an expense')?.closest('form')
 const descriptionField = () => addForm().querySelector('input')
@@ -165,7 +204,10 @@ const thumbs = () => $$('.receipt-thumb')
 const attachControl = () =>
   byText('label', 'add a receipt')?.querySelector('input')
 
-afterEach(unmount)
+afterEach(() => {
+  opened.length = 0
+  return unmount()
+})
 
 async function fillAndSubmit({ description = 'Lunch', amount = '20.00' } = {}) {
   await change(descriptionField(), description)
@@ -395,7 +437,7 @@ describe('what actually crosses the wire', () => {
   })
 })
 
-describe('recovering an account from the group side', () => {
+describe('recovering an account, from the group side', () => {
   const spent = [
     {
       id: 3,
@@ -424,77 +466,32 @@ describe('recovering an account from the group side', () => {
       )
     )
 
-  const openWithThree = async () => {
-    const api = await fakeApi({ seed: spent })
-    // A third member: the new account the lost one is merged into.
-    api.events.splice(2, 0, {
-      id: 2.5,
-      type: 'member.added',
-      payload: { user_id: 3, display_name: 'd-again' },
-    })
+  test('offers no way to turn one member into another', async () => {
+    // The control this replaces let any member reassign anyone's history at
+    // any time. Claiming now happens only on a join, so the group side has
+    // nothing to offer — and nothing to get wrong. See plan/12.
+    await fakeApi({ seed: spent })
     await open()
-    return api
-  }
-
-  test('is offered as a plain, unalarming control', async () => {
-    await openWithThree()
-    assert.ok(byText('button', 'someone lost their account?'))
+    assert.equal(byText('button', 'someone lost their account?'), undefined)
+    assert.equal(byText('h4', 'Same person, new account'), undefined)
   })
 
-  test('moves what they owed onto the new account', async () => {
-    const api = await openWithThree()
-    assert.deepEqual(balances(), {
-      v: 'is owed $5.00',
-      d: 'owes $5.00',
-      'd-again': 'settled up',
+  test('a join that claims a member takes over their balance', async () => {
+    const api = await fakeApi({ seed: spent })
+    // Member 2 lost their account and has come back as member 3, by accepting
+    // an invite naming member 2. The server writes the claim into member.added
+    // itself, in the clear, which is what lets it enforce claiming-once.
+    api.events.push({
+      id: 5,
+      type: 'member.added',
+      payload: { user_id: 3, display_name: 'd-again', claims: 2 },
     })
+    await open()
 
-    await click(byText('button', 'someone lost their account?'))
-    const form = byText('h4', 'Same person')?.closest('form')
-    const [oldPick, newPick] = form.querySelectorAll('select')
-    await change(oldPick, '2')
-    await change(newPick, '3')
-    await submit(form)
-
-    const merge = api.posted.find((e) => e.type === 'member.merged')
-    assert.ok(merge, 'a merge event was appended')
-    assert.deepEqual(
-      { old: merge.payload.old_member_id, new: merge.payload.new_member_id },
-      { old: 2, new: 3 }
-    )
-
-    // The old account is gone from the group and the debt followed the person.
     assert.deepEqual(balances(), {
       v: 'is owed $5.00',
       'd-again': 'owes $5.00',
     })
-  })
-
-  test('the merge event is encrypted like everything else', async () => {
-    const api = await openWithThree()
-    await click(byText('button', 'someone lost their account?'))
-    const form = byText('h4', 'Same person')?.closest('form')
-    const [oldPick, newPick] = form.querySelectorAll('select')
-    await change(oldPick, '2')
-    await change(newPick, '3')
-    await submit(form)
-
-    const raw = api.raw.find((e) => e.type === 'member.merged')
-    assert.ok(raw.payload.enc, 'who was merged into whom is not the server’s business')
-    assert.ok(!JSON.stringify(raw).includes('old_member_id'))
-  })
-
-  test('refuses to merge someone into themselves', async () => {
-    const api = await openWithThree()
-    await click(byText('button', 'someone lost their account?'))
-    const form = byText('h4', 'Same person')?.closest('form')
-    const [oldPick, newPick] = form.querySelectorAll('select')
-    await change(oldPick, '2')
-    await change(newPick, '2')
-    await submit(form)
-
-    assert.ok(text().includes('same person'))
-    assert.equal(api.posted.filter((e) => e.type === 'member.merged').length, 0)
   })
 })
 
@@ -692,21 +689,35 @@ describe('inviting someone', () => {
 })
 
 describe('when you are no longer part of the group', () => {
-  test('says so rather than treating you as someone else', async () => {
-    // Member 1 has been merged into member 2, so `me` is no longer in the
-    // member list. Falling back to the first member — as this used to — meant
-    // silently becoming them, and the next expense you added would be
-    // attributed to them.
-    await fakeApi({
-      seed: [
-        {
-          id: 3,
-          type: 'member.merged',
-          author: 2,
-          payload: { old_member_id: 1, new_member_id: 2 },
-        },
+  const ghostMe = (id = 3) => ({
+    id,
+    type: 'member.left',
+    author: 2,
+    payload: { member_id: 1 },
+  })
+
+  const spent = {
+    id: 4,
+    type: 'expense.created',
+    author: 2,
+    payload: {
+      expense_id: 'e1',
+      description: 'Dinner',
+      amount_cents: 1000,
+      payers: [{ user_id: 2, paid_cents: 1000 }],
+      splits: [
+        { user_id: 1, share_cents: 500 },
+        { user_id: 2, share_cents: 500 },
       ],
-    })
+      date: '2026-01-01',
+    },
+  }
+
+  test('says so rather than treating you as someone else', async () => {
+    // Member 1 — me — has been ghosted. Falling back to the first member, as
+    // this once did, meant silently becoming them, and the next expense added
+    // would have been attributed to them.
+    await fakeApi({ seed: [ghostMe()] })
     await open()
 
     assert.ok(text().includes('no longer part of this group'))
@@ -715,35 +726,86 @@ describe('when you are no longer part of the group', () => {
     assert.equal($('.scan'), null)
   })
 
-  test('still shows the ledger as it stood', async () => {
-    // The merge comes first: a claimer must have no activity, so an expense
-    // naming member 2 beforehand would (correctly) get the merge rejected.
-    await fakeApi({
-      seed: [
-        {
-          id: 3,
-          type: 'member.merged',
-          author: 2,
-          payload: { old_member_id: 1, new_member_id: 2 },
-        },
-        {
-          id: 4,
-          type: 'expense.created',
-          author: 2,
-          payload: {
-            expense_id: 'e1',
-            description: 'Dinner',
-            amount_cents: 1000,
-            payers: [{ user_id: 2, paid_cents: 1000 }],
-            splits: [{ user_id: 2, share_cents: 1000 }],
-            date: '2026-01-01',
-          },
-        },
-      ],
+  test('says so when someone else joined as me, too', async () => {
+    // The other route to having no member id: a join that claimed me.
+    const api = await fakeApi()
+    api.events.push({
+      id: 3,
+      type: 'member.added',
+      payload: { user_id: 3, display_name: 'not me', claims: 1 },
     })
+    await open()
+    assert.ok(text().includes('no longer part of this group'))
+  })
+
+  test('still shows the ledger as it stood', async () => {
+    await fakeApi({ seed: [spent, ghostMe(5)] })
     await open()
     // What you had is still yours to read.
     assert.ok(text().includes('Ledger'))
     assert.ok(text().includes('expense.created'))
+  })
+
+  test('offers to revive, and says what stays behind', async () => {
+    await fakeApi({ seed: [spent, ghostMe(5)] })
+    await open()
+    assert.ok(byText('button', 'Revive as my own group'))
+    // Receipts and comments do not come across, and a screen that stayed quiet
+    // about that would be losing things on the user's behalf. See plan/12.
+    assert.ok(text().includes('stay behind'))
+  })
+
+  test('reviving clones the ledger into a group of my own', async () => {
+    const api = await fakeApi({ seed: [spent, ghostMe(5)] })
+    await open()
+    await click(byText('button', 'Revive as my own group'))
+
+    assert.equal(api.created.length, 1, 'a new group was made')
+    const types = api.revived.map((e) => e.type)
+    assert.equal(types[0], 'group.revived_from', 'it says where it came from')
+    // Member 2 becomes a ghost; the expense comes across; I am not ghosted in
+    // my own group, so there is exactly one ghost.
+    assert.equal(types.filter((t) => t === 'member.ghost_added').length, 1)
+    assert.equal(types.filter((t) => t === 'expense.created').length, 1)
+    assert.equal(types.filter((t) => t === 'member.left').length, 0,
+      'nobody is ghosted twice — being a ghost from the start covers it')
+    assert.deepEqual(opened, [8], 'and it opens the new group')
+  })
+
+  test('everything written into the new group is sealed', async () => {
+    const api = await fakeApi({ seed: [spent, ghostMe(5)] })
+    await open()
+    await click(byText('button', 'Revive as my own group'))
+
+    assert.ok(api.revived.length > 0)
+    assert.ok(api.revived.every((e) => e.payload.enc), 'no plaintext escaped')
+    assert.ok(!JSON.stringify(api.revived).includes('Dinner'))
+  })
+
+  test('hides the old group only after the clone is written', async () => {
+    const api = await fakeApi({ seed: [spent, ghostMe(5)] })
+    await open()
+    await click(byText('button', 'Revive as my own group'))
+    assert.deepEqual(api.hidden, [7])
+  })
+
+  test('does not hide the old group if the clone fails', async () => {
+    // Losing sight of the original with nothing to show for it would be the
+    // one genuinely destructive way this can go wrong.
+    const api = await fakeApi({ seed: [spent, ghostMe(5)] })
+    await open()
+    const realFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) =>
+      String(url).includes('/groups/8/events')
+        ? { ok: false, status: 500, json: async () => ({ detail: 'nope' }) }
+        : realFetch(url, options)
+    try {
+      await click(byText('button', 'Revive as my own group'))
+    } finally {
+      globalThis.fetch = realFetch
+    }
+
+    assert.deepEqual(api.hidden, [], 'the original is still there')
+    assert.deepEqual(opened, [], 'and we did not navigate away from it')
   })
 })

@@ -20,6 +20,7 @@ import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
+import { planRevive } from './revive'
 import { loadAiSettings, saveApiKey } from './aikeys'
 import { downloadJson, exportLedger, ledgerFilename } from './export'
 
@@ -252,6 +253,7 @@ function Home({ user, onLogout }) {
           me={user}
           ai={ai}
           onBack={() => setGroupId(null)}
+          onOpen={setGroupId}
         />
       ) : (
         <GroupList onOpen={setGroupId} />
@@ -655,28 +657,16 @@ function ReceiptThumb({ groupId, receiptId }) {
  *  taking over the ghost are one act, so there is no window in which the wrong
  *  person could claim it. See plan/12. */
 async function acceptInvite(invite) {
-  const g = await api('groups/join', { code: invite.code })
+  // Joining and claiming are a single server-side act: the claim rides on the
+  // member.added event the server writes, so there is no window in between and
+  // no second call that could fail on its own. See plan/12.
+  const g = await api('groups/join', {
+    code: invite.code,
+    claims: invite.member_id ?? null,
+  })
   // The key came from the URL fragment, which the server never saw; seal it to
   // this account and device so it survives.
   await publishGroupKey(g.id, invite.gk)
-
-  if (invite.member_id) {
-    const me = await api('me')
-    const key = await groupKey(g.id)
-    if (key) {
-      await api(`groups/${g.id}/events`, {
-        event_id: crypto.randomUUID(),
-        type: 'member.merged',
-        payload: {
-          enc: await encryptPayload(key, {
-            old_member_id: invite.member_id,
-            new_member_id: me.id,
-            updated_at: Date.now(),
-          }),
-        },
-      })
-    }
-  }
   return g
 }
 
@@ -778,75 +768,6 @@ function AddGhost({ onAdd }) {
         onChange={(e) => setName(e.target.value)}
       />
       <button type="submit">Add to the group</button>
-      {error && <p className="error">{error}</p>}
-    </form>
-  )
-}
-
-// Recovering an account, from the group's side. Deliberately plain and a
-// little grudging: it is an identity-level claim, and while any member can
-// already edit any expense, this one is easier to miss after the fact.
-function MergeMembers({ members, onMerge }) {
-  const [open, setOpen] = useState(false)
-  const [oldId, setOldId] = useState('')
-  const [newId, setNewId] = useState('')
-  const [error, setError] = useState('')
-
-  async function submit(e) {
-    e.preventDefault()
-    setError('')
-    const from = Number(oldId)
-    const to = Number(newId)
-    if (!from || !to) return setError('Pick both people')
-    if (from === to) return setError('Those are the same person')
-    try {
-      await onMerge(from, to)
-      setOpen(false)
-      setOldId('')
-      setNewId('')
-    } catch (err) {
-      setError(err.message)
-    }
-  }
-
-  if (members.length < 2) return null
-  if (!open) {
-    return (
-      <button className="link" onClick={() => setOpen(true)}>
-        someone lost their account?
-      </button>
-    )
-  }
-
-  const pick = (value, set, label) => (
-    <label className="field">
-      {label}
-      <select value={value} onChange={(e) => set(e.target.value)}>
-        <option value="">choose…</option>
-        {members.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.display_name}
-          </option>
-        ))}
-      </select>
-    </label>
-  )
-
-  return (
-    <form onSubmit={submit}>
-      <h4>Same person, new account</h4>
-      <p className="muted">
-        Their old history moves to the new account and the old one disappears
-        from this group. Everyone sees it, and it cannot be undone.
-      </p>
-      {pick(oldId, setOldId, 'the account they lost')}
-      {pick(newId, setNewId, 'the account they use now')}
-      <div className="row-actions">
-        <button type="submit">Merge them</button>
-        <button type="button" className="link" onClick={() => setOpen(false)}>
-          cancel
-        </button>
-      </div>
       {error && <p className="error">{error}</p>}
     </form>
   )
@@ -1006,7 +927,7 @@ function GroupList({ onOpen }) {
   )
 }
 
-export function GroupView({ groupId, me, ai, onBack }) {
+export function GroupView({ groupId, me, ai, onBack, onOpen }) {
   const [meta, setMeta] = useState(null)
   const [events, setEvents] = useState([])
   const [version, setVersion] = useState(0)
@@ -1150,9 +1071,6 @@ export function GroupView({ groupId, me, ai, onBack }) {
       throw err
     }
   }
-  // Someone who lost every device signs up again and gets re-invited; this
-  // reattaches their history to the account they can actually sign for. See
-  // plan/07 — the group vouches for them, because the server cannot.
   // Turn a member into a ghost. Anyone may do this to anyone, themselves
   // included — leaving is ghosting yourself. It takes nothing away: the server
   // keeps serving them the group frozen at this event. See plan/12.
@@ -1173,6 +1091,35 @@ export function GroupView({ groupId, me, ai, onBack }) {
     await pull()
   }
 
+  // Clone what I can still see into a group of my own. The prefix I was served
+  // is mine to keep; replaying it is what turns a frozen view into somewhere I
+  // can carry on. See plan/12.
+  async function revive() {
+    setError('')
+    try {
+      const g = await api('groups', { name: meta.name })
+      // Before any event exists, so there is never a window in which one would
+      // have nothing to encrypt under.
+      const key = await createGroupKey(g.id)
+      const { events: planned } = planRevive(state, meId, {
+        from: { group_id: groupId, at_event_id: version },
+      })
+      for (const ev of planned) {
+        await api(`groups/${g.id}/events`, {
+          event_id: crypto.randomUUID(),
+          type: ev.type,
+          payload: { enc: await encryptPayload(key, ev.payload) },
+        })
+      }
+      // Only once the clone is safely written. Hiding first would risk losing
+      // sight of the original with nothing to show for it.
+      await api(`groups/${groupId}/hide`, {})
+      onOpen(g.id)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   // Someone who splits expenses with the group but doesn't use the app.
   // Negative ids so they can never collide with a server-issued user id, and
   // still numbers so the split maths keeps working. See plan/12.
@@ -1188,13 +1135,6 @@ export function GroupView({ groupId, me, ai, onBack }) {
     // to be this member.
     return member_id
   }
-
-  const mergeMembers = (old_member_id, new_member_id) =>
-    appendEvent('member.merged', {
-      old_member_id,
-      new_member_id,
-      updated_at: Date.now(),
-    }).then(pull)
 
   const recordSettlement = (from, to, amount_cents) =>
     appendSettlement(
@@ -1250,9 +1190,11 @@ export function GroupView({ groupId, me, ai, onBack }) {
 
   if (!meta) return null
 
-  // Merged away, or ghosted. Attributing new expenses to a stand-in would be
+  // Ghosted, or claimed away by someone who joined as me. Either way there is
+  // nobody here to attribute a new expense to, and picking a stand-in would be
   // worse than refusing.
-  if (state.members.length > 0 && meId === null) {
+  const meGhosted = !!state.members.find((m) => m.id === meId)?.ghost
+  if (state.members.length > 0 && (meId === null || meGhosted)) {
     return (
       <section>
         <button className="link" onClick={onBack}>
@@ -1263,6 +1205,20 @@ export function GroupView({ groupId, me, ai, onBack }) {
           You&rsquo;re no longer part of this group. What you can see here is
           how it stood when you left; it won&rsquo;t change again.
         </p>
+        {meGhosted && (
+          <div className="revive">
+            <p>
+              You can carry on with a copy of your own. Every balance comes
+              across exactly as it stands; everyone else becomes a ghost, so
+              you can keep splitting with them, invite them, or settle up.
+            </p>
+            <p className="muted">
+              Receipt images and comments stay behind. Nothing owed changes.
+            </p>
+            <button onClick={revive}>Revive as my own group</button>
+          </div>
+        )}
+        {error && <p className="error">{error}</p>}
         <LedgerLog
           group={{ id: groupId, name: meta.name }}
           version={version}
@@ -1346,7 +1302,6 @@ export function GroupView({ groupId, me, ai, onBack }) {
 
       <AddGhost onAdd={addGhost} />
       <LeaveOrGhost members={state.members} meId={meId} onGhost={ghostMember} />
-      <MergeMembers members={state.members} onMerge={mergeMembers} />
 
       {state.members.length > 0 && (
         <ExpenseForm

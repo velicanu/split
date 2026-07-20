@@ -119,9 +119,14 @@ no part in key distribution at all.
 Consequence: an invite link *is* the group key. Anywhere a URL is logged or preview-fetched, the
 key leaks — so a join link must not be treated as an ordinary share.
 
-**Merge** (account recovery, see [07](07-key-recovery.md)) — `member.merged {old_member_id,
-new_member_id}`. The fold builds an alias map and resolves `splits`, `payers`, settlement
-`from`/`to`, and comment `author` through it.
+**Claim** (account recovery, see [07](07-key-recovery.md) and [12](12-membership.md)) — a `claims`
+field on `member.added`, set when an invite named a member to become. The fold builds an alias map
+and resolves `splits`, `payers`, settlement `from`/`to`, and comment `author` through it.
+
+Because `member.added` is the one event the *server* writes, and writes in the clear, claiming a
+member at most once is enforced rather than left to every client to honour. It also means claiming
+can only happen at the instant of joining: there is no event an existing member can write to become
+somebody else.
 
 ## Accepted risks
 
@@ -146,7 +151,7 @@ One PR at a time; each leaves a working app.
 | **A** | This document. Keypair auth, devices, revocation, password wraps. **No encryption yet** — payloads stay readable so the auth model can be debugged before everything goes opaque. |
 | **B** | Group keys, encrypted event payloads, invite-fragment distribution. |
 | **C** | Encrypted receipts, content-hash blob ids. |
-| **D** | `member.merged` and alias folding. |
+| **D** | Claim-on-join (`member.added.claims`) and alias folding. |
 
 Passkey-PRF wraps slot in additively at any point via `key_wraps.method`.
 

@@ -18,8 +18,15 @@ This splits the problem into "where ciphertext lives" (easy) vs "the one recover
 ## v1 decision: re-invite is the recovery story
 
 **Decided:** there is no recovery phrase in v1. If a user loses every device *and* their password,
-they make a **new account** and get re-invited to each group, with a `member.merged` event mapping
-the old member id to the new one (see [11](11-identity-and-devices.md)).
+they make a **new account** and get re-invited to each group. Someone still in the group ghosts the
+lost member and sends an invite naming it; accepting that invite joins and claims it in one act, so
+the old history reattaches to an account that can actually sign for itself
+(see [12](12-membership.md)).
+
+There is deliberately no way to do this after the fact. Claiming is a field on the join, not an
+event anyone can write, which means no member already in a group can become someone else. The cost
+is that a plain invite accepted by mistake cannot be corrected afterwards — the fix is to ghost
+them and re-invite with the right link, which is this same path again.
 
 This works only because we do not rotate group keys — one group key decrypts the entire history, so
 a re-invited user gets everything back rather than only events from now on.

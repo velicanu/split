@@ -656,3 +656,124 @@ def test_ghosting_needs_membership_and_is_not_undone_by_repeating_it():
     # Ghosting again must not move the cut forward and hand them more.
     ghost(owner, gid, other_id, events_of(owner, gid)["version"])
     assert events_of(other, gid)["version"] == cut
+
+
+def test_a_join_can_claim_a_member_and_the_claim_is_in_the_clear():
+    """The claim rides on member.added, which is the one event the server
+    writes. That is what lets it be enforced rather than merely agreed —
+    everything else in a group is sealed and the server cannot read it."""
+    owner = signed_up("cl-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+
+    joiner = signed_up("cl-joiner")
+    res = joiner.post("/api/groups/join", json={"code": group["code"], "claims": -100})
+    assert res.status_code == 200
+
+    joined = [
+        e for e in events_of(owner, gid)["events"] if e["type"] == "member.added"
+    ][-1]
+    assert joined["payload"]["claims"] == -100
+    assert joined["payload"]["user_id"] == joiner.get("/api/me").json()["id"]
+
+
+def test_an_ordinary_join_claims_nothing():
+    owner = signed_up("nc-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    joiner = signed_up("nc-joiner")
+    joiner.post("/api/groups/join", json={"code": group["code"]})
+
+    added = [
+        e
+        for e in events_of(owner, group["id"])["events"]
+        if e["type"] == "member.added"
+    ]
+    assert all("claims" not in e["payload"] for e in added)
+
+
+def test_a_member_can_only_be_claimed_once():
+    """An invite link names who to become. Used twice, the second person would
+    otherwise displace the first, who would be left with no history and no
+    sign of what happened."""
+    owner = signed_up("once-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+
+    first = signed_up("once-first")
+    assert (
+        first.post(
+            "/api/groups/join", json={"code": group["code"], "claims": -100}
+        ).status_code
+        == 200
+    )
+
+    second = signed_up("once-second")
+    res = second.post("/api/groups/join", json={"code": group["code"], "claims": -100})
+    assert res.status_code == 409
+
+    # And the refusal is total: they did not quietly join without the claim.
+    added = [e for e in events_of(owner, gid)["events"] if e["type"] == "member.added"]
+    assert len(added) == 2, "only the owner and the first claimant"
+
+
+def test_claiming_a_different_member_is_still_allowed():
+    """Claiming-once is per member id, not per group — otherwise one recovery
+    would block every later one."""
+    owner = signed_up("many-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+
+    for i, name in enumerate(["many-a", "many-b"]):
+        joiner = signed_up(name)
+        res = joiner.post(
+            "/api/groups/join", json={"code": group["code"], "claims": -100 - i}
+        )
+        assert res.status_code == 200
+
+
+def test_you_cannot_claim_yourself():
+    owner = signed_up("self-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    joiner = signed_up("self-joiner")
+    mine = joiner.get("/api/me").json()["id"]
+
+    res = joiner.post("/api/groups/join", json={"code": group["code"], "claims": mine})
+    assert res.status_code == 400
+
+
+def test_hiding_a_group_removes_it_from_the_list_but_keeps_the_membership():
+    """What revive does to the group it leaves behind. The row stays, so the
+    frozen prefix and any receipts remain reachable — the decision about what
+    receipts should do is still open. See plan/12."""
+    owner = signed_up("hide-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    other = signed_up("hide-other")
+    other.post("/api/groups/join", json={"code": group["code"]})
+
+    assert gid in [g["id"] for g in other.get("/api/groups").json()]
+
+    assert other.post(f"/api/groups/{gid}/hide").json()["hidden"] is True
+    assert gid not in [g["id"] for g in other.get("/api/groups").json()]
+
+    # Still a member: the log is still served.
+    assert other.get(f"/api/groups/{gid}/events?since=0").status_code == 200
+    # And only for them — hiding is per person.
+    assert gid in [g["id"] for g in owner.get("/api/groups").json()]
+
+
+def test_hiding_is_reversible():
+    owner = signed_up("unhide-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    owner.post(f"/api/groups/{gid}/hide")
+    assert gid not in [g["id"] for g in owner.get("/api/groups").json()]
+
+    owner.post(f"/api/groups/{gid}/hide?hidden=false")
+    assert gid in [g["id"] for g in owner.get("/api/groups").json()]
+
+
+def test_hiding_needs_membership():
+    owner = signed_up("hm-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    stranger = signed_up("hm-stranger")
+    assert stranger.post(f"/api/groups/{group['id']}/hide").status_code == 404
