@@ -97,6 +97,15 @@ export const loadDeviceKey = () => idbGet(DEVICE_KEY)
 export const saveDeviceKey = (key) => idbPut(DEVICE_KEY, key)
 export const forgetDeviceKey = () => idbDelete(DEVICE_KEY)
 
+// The last `me` this device saw, so an offline refresh has an identity to open
+// with rather than bouncing to the sign-in screen. Only who-you-are — id,
+// handle, display name — never key material. Cleared on logout with everything
+// else.
+const SESSION = 'session'
+export const loadSession = () => idbGet(SESSION)
+export const saveSession = (me) => idbPut(SESSION, me)
+export const forgetSession = () => idbDelete(SESSION)
+
 export async function sign(privkeyB64, message) {
   await ready
   const bytes = typeof message === 'string' ? sodium.from_string(message) : message

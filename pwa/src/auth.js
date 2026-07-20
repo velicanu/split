@@ -14,10 +14,13 @@ import { adoptGroupsForNewDevice, forgetGroupKeys } from './groupkeys'
 import { forgetLocalLedger } from './store'
 import {
   forgetDeviceKey,
+  forgetSession,
   generateAccountKey,
   generateDeviceKey,
   loadDeviceKey,
+  loadSession,
   saveDeviceKey,
+  saveSession,
   sign,
   unwrapAccountKey,
   wrapAccountKey,
@@ -62,7 +65,9 @@ export async function signup({ login_handle, display_name, password }) {
   // Only stored once the server has accepted it, so a failed signup doesn't
   // leave a key behind that matches no account.
   await saveDeviceKey(device)
-  return api('me')
+  const me = await api('me')
+  await saveSession(me)
+  return me
 }
 
 /** This device already holds a key. Nothing to type. */
@@ -71,11 +76,21 @@ export async function resume() {
   if (!device) return null
   try {
     await authenticate(device)
-    return await api('me')
-  } catch {
-    // The key is unknown or revoked — most likely this device was revoked from
-    // somewhere else. Drop it so the UI offers a fresh sign-in.
+    const me = await api('me')
+    // Remembered so the next offline refresh has someone to be.
+    await saveSession(me)
+    return me
+  } catch (err) {
+    if (err.offline) {
+      // Couldn't reach the server — not the same as being turned away. Keep the
+      // key and open against whatever this device already holds. A refresh with
+      // no signal must not sign you out, still less delete your only key.
+      return (await loadSession()) ?? null
+    }
+    // The server rejected the key: revoked from another device. Drop it so the
+    // UI offers a fresh sign-in.
     await forgetDeviceKey()
+    await forgetSession()
     return null
   }
 }
@@ -108,7 +123,9 @@ export async function enrol({ login_handle, password }) {
   // them to the new device key before the account key is dropped.
   await adoptGroupsForNewDevice(account)
   await adoptApiKeysForNewDevice(account)
-  return api('me')
+  const me = await api('me')
+  await saveSession(me)
+  return me
 }
 
 /** Re-wrap the account key under a new password. Needs the old one, because
@@ -133,8 +150,16 @@ export async function changePassword({ login_handle, current, next }) {
  *  The server deletes the device; this drops the key that would have proved
  *  ownership of it. Getting back in needs the password, via enrol(). */
 export async function logout() {
-  await api('logout', {})
+  try {
+    await api('logout', {})
+  } catch {
+    // Offline, so the device can't be deleted server-side right now — the row
+    // lingers until it's revoked from another device. But logging out still
+    // has to clear everything local: on a shared computer that is the whole
+    // point, and it must not depend on there being a signal.
+  }
   await forgetDeviceKey()
+  await forgetSession()
   forgetGroupKeys()
   // The local ledger goes too. It outlives the credentials that justified it
   // otherwise — and on a shared computer that is the whole group's history

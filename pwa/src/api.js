@@ -32,11 +32,22 @@ export function describeError(res, data) {
 }
 
 export async function api(path, body, method) {
-  const res = await fetch(`/api/${path}`, {
-    method: method || (body ? 'POST' : 'GET'),
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  })
+  let res
+  try {
+    res = await fetch(`/api/${path}`, {
+      method: method || (body ? 'POST' : 'GET'),
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    })
+  } catch {
+    // fetch only rejects when the request never completed — offline, DNS,
+    // connection refused. That is not the server saying no, and callers need
+    // to tell the two apart: signing out on "couldn't reach the server" would
+    // drop this device's key on every refresh with no signal.
+    const offline = new Error('offline')
+    offline.offline = true
+    throw offline
+  }
   const data = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(describeError(res, data))
   return data
