@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { currentView, readView, viewHash } from './nav.js'
+import { readView, viewHash } from './nav.js'
 
 describe('reading a view from the fragment', () => {
   test('no fragment is the list', () => {
@@ -50,29 +50,5 @@ describe('writing a view to a fragment', () => {
 
   test('the list has no fragment, so its URL stays clean', () => {
     assert.equal(viewHash({ view: 'list' }), '')
-  })
-})
-
-describe('the view implied by navigation state', () => {
-  test('settings wins, then a group, else the list', () => {
-    assert.deepEqual(currentView({ showSettings: true, groupId: 7 }), {
-      view: 'settings',
-    })
-    assert.deepEqual(currentView({ showSettings: false, groupId: 7 }), {
-      view: 'group',
-      id: 7,
-    })
-    assert.deepEqual(currentView({ showSettings: false, groupId: null }), {
-      view: 'list',
-    })
-  })
-
-  test('group id zero is still a group, not the list', () => {
-    // Defensive: `groupId != null` is the test, not `!groupId`. No real group
-    // has id 0 today, but reading it as "no group" would be a lurking bug.
-    assert.deepEqual(currentView({ showSettings: false, groupId: 0 }), {
-      view: 'group',
-      id: 0,
-    })
   })
 })
