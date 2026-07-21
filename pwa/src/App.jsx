@@ -121,6 +121,13 @@ export function ReadOnlyGroup({ link, user, onExit }) {
   const [error, setError] = useState('')
   const [joining, setJoining] = useState(false)
   const [viewing, setViewing] = useState(null)
+  // How a viewer reads receipts: the key from the link, and the read token for
+  // the members-only blob endpoint. Stable, so ReceiptThumb's effect doesn't
+  // re-fetch on every render.
+  const receiptAccess = useMemo(
+    () => ({ key: link.gk, readToken: link.readToken }),
+    [link.gk, link.readToken]
+  )
 
   useEffect(() => {
     let live = true
@@ -261,6 +268,7 @@ export function ReadOnlyGroup({ link, user, onExit }) {
           members={state.members}
           meId={null}
           readOnly
+          receiptAccess={receiptAccess}
           onClose={() => setViewing(null)}
         />
       )}
@@ -1027,19 +1035,19 @@ function InviteLink({ groupId, code, members, onAddGhost }) {
 
 // Receipts are ciphertext on the server, so a plain <img src> would render
 // nothing. Fetch, verify against the content hash, decrypt, then show.
-function ReceiptThumb({ groupId, receiptId }) {
+function ReceiptThumb({ groupId, receiptId, access }) {
   const [url, setUrl] = useState('')
   const [failed, setFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    receiptUrl(groupId, receiptId)
+    receiptUrl(groupId, receiptId, access)
       .then((u) => !cancelled && setUrl(u))
       .catch(() => !cancelled && setFailed(true))
     return () => {
       cancelled = true
     }
-  }, [groupId, receiptId])
+  }, [groupId, receiptId, access])
 
   if (failed) {
     return <span className="receipt-thumb muted">unreadable</span>
@@ -1899,11 +1907,13 @@ function ExpenseDetail({
   onPost,
   onEdit,
   onDelete,
-  // A share-link viewer sees the same detail with nothing to act on. The
-  // rescan and comment edit/delete controls are already gated (no ai, no meId
-  // for a viewer); this additionally drops the receipt images — those come from
-  // a members-only endpoint the viewer can't reach — and the comment form.
+  // A share-link viewer sees the same detail with nothing to act on. The rescan
+  // and comment edit/delete controls are already gated (no ai, no meId for a
+  // viewer); readOnly additionally drops the comment form. Receipt images are
+  // shown either way, but a viewer reaches them with `receiptAccess` — the key
+  // from the link and the read token — since they have no stored key or session.
   readOnly = false,
+  receiptAccess,
 }) {
   const nameById = Object.fromEntries(members.map((m) => [m.id, m.display_name]))
   const [text, setText] = useState('')
@@ -1950,13 +1960,17 @@ function ExpenseDetail({
             : ''}
         </p>
 
-        {!readOnly && expense.receipts?.length > 0 && (
+        {expense.receipts?.length > 0 && (
           <>
             <h4>Receipts</h4>
             <div className="receipt-strip">
               {expense.receipts.map((rid) => (
                 <div key={rid} className="receipt-cell">
-                  <ReceiptThumb groupId={groupId} receiptId={rid} />
+                  <ReceiptThumb
+                    groupId={groupId}
+                    receiptId={rid}
+                    access={receiptAccess}
+                  />
                   {/* Re-reading a receipt belongs with the receipt, on the
                       expense it's attached to — not on the add form, which
                       has no business holding one past creation. */}
