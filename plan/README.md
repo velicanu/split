@@ -22,6 +22,8 @@ shared contract comes first because everything else conforms to it.
 | 09 | [AI features](09-ai-features.md) | Receipt scanning and natural-language split directives via a capability ladder (on-device → in-browser WebGPU → cloud), with consent gating. |
 | 10 | [Native apps (later)](10-native-apps.md) | Native clients that speak the same shared contract, reach the OS on-device AI, and resolve the App Store ↔ AGPL licensing tension. |
 | 11 | [Identity, devices & revocation](11-identity-and-devices.md) | The concrete slice under 06/07: challenge-signed auth with no server-side passwords, per-device keypairs, real device revocation, and the schema/endpoints/flows for each. |
+| 12 | [Ghosts, leaving & membership](12-membership.md) | One mechanism for people who don't use the app, who leave, and who lost their account: ghost members, ghosting as a fork, claim-on-join, and revive. |
+| 13 | [Receipt-scanning backends](13-receipt-scanning-backends.md) | A shared backend scanner alongside direct-provider keys: a fixed image→JSON contract, group-scoped credentials sealed into the ledger, and real backend-side revocation. |
 
 ## Cross-cutting principles
 
