@@ -19,7 +19,7 @@ import { changePassword, enrol, logout as signOut, resume, signup } from './auth
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
-import { currentView, readView, viewHash } from './nav'
+import { readView, viewHash } from './nav'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
 import { planRevive } from './revive'
 import {
@@ -181,30 +181,52 @@ function Auth({ onAuth }) {
   )
 }
 
+// The current screen, backed by browser history so a refresh returns here and
+// the Android back gesture (and desktop back button) walk the views the way
+// they walk pages anywhere else. See nav.js.
+//
+// History is the source of truth, not React state: `navigate` pushes an entry
+// and updates the view, and a back/forward — which is a popstate — reads the
+// view back out of the URL. Pushing is what gives back somewhere to go;
+// replaceState would leave the stack empty and back would exit the app, which
+// is the bug this fixes.
+function useView(initial) {
+  const [view, setView] = useState(initial)
+
+  useEffect(() => {
+    const onPop = () => setView(readView(window.location.hash))
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  const navigate = useCallback((next, { replace = false } = {}) => {
+    const target = viewHash(next)
+    const url = target || window.location.pathname
+    // Don't stack a second entry for the view we are already on — a repeated
+    // tap on "home" should not need two back gestures to undo.
+    if (!replace && window.location.hash === target) {
+      setView(next)
+      return
+    }
+    window.history[replace ? 'replaceState' : 'pushState'](null, '', url)
+    setView(next)
+  }, [])
+
+  return [view, navigate]
+}
+
 export function Home({ user, onLogout }) {
   // The fragment at load: an invite to consume, or a view to restore. Captured
-  // once, because clearing the invite key below mutates the address bar.
+  // once, because the invite key is cleared from the address bar below.
   const openedAt = useState(() => window.location.hash)[0]
   const [pendingInvite] = useState(() => parseInvite(openedAt))
   // An invite takes over the fragment, so while one is pending there is no view
   // to restore — land on the list and let the invite move us.
-  const restored = pendingInvite ? { view: 'list' } : readView(openedAt)
-
-  const [groupId, setGroupId] = useState(
-    restored.view === 'group' ? restored.id : null
+  const [view, navigate] = useView(
+    pendingInvite ? { view: 'list' } : readView(openedAt)
   )
-  const [showSettings, setShowSettings] = useState(restored.view === 'settings')
-
-  // Keep the fragment in step with the view, so a refresh returns here. Replace
-  // rather than push: navigating within the app should not stack history
-  // entries, and this also clears an invite's key from the address bar.
-  useEffect(() => {
-    const target = viewHash(currentView({ showSettings, groupId }))
-    const url = target || window.location.pathname
-    if (window.location.hash !== target) {
-      window.history.replaceState(null, '', url)
-    }
-  }, [groupId, showSettings])
+  const groupId = view.view === 'group' ? view.id : null
+  const showSettings = view.view === 'settings'
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
 
@@ -227,18 +249,19 @@ export function Home({ user, onLogout }) {
     ;(async () => {
       try {
         const g = await acceptInvite(pendingInvite)
-        if (!cancelled) setGroupId(g.id)
+        if (!cancelled) navigate({ view: 'group', id: g.id }, { replace: true })
       } catch {
         // Already a member, or a stale link — the groups list still works.
+        if (!cancelled) navigate({ view: 'list' }, { replace: true })
       }
-      // The key is already out of the address bar: the view effect replaced the
-      // fragment on mount, before this resolved. Landing in the group (or not)
-      // is all that is left to do.
+      // Either way this replaces the invite fragment, taking its key out of the
+      // address bar. Replace, not push: arriving from a link is a redirect, so
+      // back should not return to a half-consumed invite URL.
     })()
     return () => {
       cancelled = true
     }
-  }, [pendingInvite])
+  }, [pendingInvite, navigate])
 
   async function logout() {
     // Un-enrols this browser as well as ending the session: the device key
@@ -253,16 +276,13 @@ export function Home({ user, onLogout }) {
       <header>
         <strong
           className="brand"
-          onClick={() => {
-            setGroupId(null)
-            setShowSettings(false)
-          }}
+          onClick={() => navigate({ view: 'list' })}
         >
           Split
         </strong>
         <span className="spacer" />
         <span className="muted">{user.display_name}</span>
-        <button className="link" onClick={() => setShowSettings(true)}>
+        <button className="link" onClick={() => navigate({ view: 'settings' })}>
           settings
         </button>
         <button className="link" onClick={logout}>
@@ -274,18 +294,18 @@ export function Home({ user, onLogout }) {
           ai={ai}
           user={user}
           onChanged={loadAi}
-          onClose={() => setShowSettings(false)}
+          onClose={() => navigate({ view: 'list' })}
         />
-      ) : groupId ? (
+      ) : groupId != null ? (
         <GroupView
           groupId={groupId}
           me={user}
           ai={ai}
-          onBack={() => setGroupId(null)}
-          onOpen={setGroupId}
+          onBack={() => navigate({ view: 'list' })}
+          onOpen={(id) => navigate({ view: 'group', id })}
         />
       ) : (
-        <GroupList onOpen={setGroupId} />
+        <GroupList onOpen={(id) => navigate({ view: 'group', id })} />
       )}
     </main>
   )

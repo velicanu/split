@@ -24,10 +24,3 @@ export function viewHash({ view, id }) {
   if (view === 'group') return `#group/${id}`
   return ''
 }
-
-/** The view implied by the current navigation state. */
-export function currentView({ showSettings, groupId }) {
-  if (showSettings) return { view: 'settings' }
-  if (groupId != null) return { view: 'group', id: groupId }
-  return { view: 'list' }
-}
