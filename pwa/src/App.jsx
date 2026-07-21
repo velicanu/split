@@ -120,6 +120,7 @@ export function ReadOnlyGroup({ link, user, onExit }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [joining, setJoining] = useState(false)
+  const [viewing, setViewing] = useState(null)
 
   useEffect(() => {
     let live = true
@@ -235,21 +236,34 @@ export function ReadOnlyGroup({ link, user, onExit }) {
       {state.ledger.length === 0 && <p className="muted">No expenses yet.</p>}
       <ul className="list">
         {state.ledger.map((x) => (
-          <li key={x.expense_id} className="row static">
-            <div className="expense">
-              <span>
-                {x.description}
-                {x.deleted ? ' (deleted)' : ''}
-              </span>
-              <span className="muted">
-                {x.payer_names.join(', ')} paid {money(x.amount_cents)} · split{' '}
-                {x.ways} way{x.ways === 1 ? '' : 's'}
-                {x.date ? ` · ${x.date}` : ''}
-              </span>
-            </div>
+          <li key={x.expense_id}>
+            <button className="row" onClick={() => setViewing(x)}>
+              <div className="expense">
+                <span>
+                  {x.description}
+                  {x.deleted ? ' (deleted)' : ''}
+                </span>
+                <span className="muted">
+                  {x.payer_names.join(', ')} paid {money(x.amount_cents)} ·
+                  split {x.ways} way{x.ways === 1 ? '' : 's'}
+                  {x.date ? ` · ${x.date}` : ''}
+                </span>
+              </div>
+            </button>
           </li>
         ))}
       </ul>
+
+      {viewing && (
+        <ExpenseDetail
+          groupId={link.groupId}
+          expense={viewing}
+          members={state.members}
+          meId={null}
+          readOnly
+          onClose={() => setViewing(null)}
+        />
+      )}
 
       {state.payments.length > 0 && (
         <>
@@ -417,6 +431,15 @@ export function Home({ user, onLogout }) {
   const showSettings = view.view === 'settings'
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
+
+  // Ask the browser not to evict the offline ledger. Only here — once someone
+  // is signed in and has data worth keeping — so an account-less read-only
+  // visitor isn't hit with a storage-permission prompt for nothing. Best-effort
+  // and evictable either way; the server plus key recovery are the durable copy
+  // (plan/04).
+  useEffect(() => {
+    navigator.storage?.persist?.().catch(() => {})
+  }, [])
 
   // Keys arrive sealed and are opened here; the server never held a readable
   // copy to send.
@@ -1876,6 +1899,11 @@ function ExpenseDetail({
   onPost,
   onEdit,
   onDelete,
+  // A share-link viewer sees the same detail with nothing to act on. The
+  // rescan and comment edit/delete controls are already gated (no ai, no meId
+  // for a viewer); this additionally drops the receipt images — those come from
+  // a members-only endpoint the viewer can't reach — and the comment form.
+  readOnly = false,
 }) {
   const nameById = Object.fromEntries(members.map((m) => [m.id, m.display_name]))
   const [text, setText] = useState('')
@@ -1922,7 +1950,7 @@ function ExpenseDetail({
             : ''}
         </p>
 
-        {expense.receipts?.length > 0 && (
+        {!readOnly && expense.receipts?.length > 0 && (
           <>
             <h4>Receipts</h4>
             <div className="receipt-strip">
@@ -2072,14 +2100,16 @@ function ExpenseDetail({
           })}
         </ul>
 
-        <form onSubmit={post}>
-          <input
-            placeholder="add a comment"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-          <button type="submit">Post</button>
-        </form>
+        {!readOnly && (
+          <form onSubmit={post}>
+            <input
+              placeholder="add a comment"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+            />
+            <button type="submit">Post</button>
+          </form>
+        )}
         {error && <p className="error">{error}</p>}
       </div>
     </div>
