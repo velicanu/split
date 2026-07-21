@@ -7,7 +7,7 @@ import { afterEach, describe, test } from 'node:test'
 import { ReadOnlyGroup } from '../src/App.jsx'
 import { encryptPayload, generateGroupKey } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
-import { $$, byText, mount, text, unmount } from './react.mjs'
+import { $$, byText, click, mount, text, unmount } from './react.mjs'
 
 const member = (id, name) => ({
   id,
@@ -109,6 +109,52 @@ describe('the read-only share view', () => {
     )
     assert.equal(byText('button', 'Join as a new member'), undefined)
     assert.ok(text().includes('read-only'))
+  })
+
+  test('lets a viewer click into an expense for the full detail', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY)
+    await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+
+    await click(byText('button', 'Dinner at the pier'))
+    // The detail: who paid, and who owes what — the point of clicking in.
+    assert.ok(byText('h4', 'Paid'))
+    assert.ok(byText('h4', 'Owes'))
+    assert.ok(text().includes('$10.00'), 'the payer')
+    assert.ok(text().includes('$5.00'), 'each share')
+  })
+
+  test('the expense detail offers nothing to edit', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY)
+    await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+    await click(byText('button', 'Dinner at the pier'))
+
+    assert.equal(byText('button', 'Post'), undefined, 'no comment form')
+    assert.ok(!text().includes('add a comment'))
+    assert.equal(byText('button', 'edit'), undefined)
+  })
+
+  test('never asks a viewer for persistent storage', async () => {
+    // The reported annoyance: an account-less viewer was prompted to allow
+    // storage. Persistence is requested only in the signed-in app now.
+    let asked = false
+    const had = globalThis.navigator.storage
+    Object.defineProperty(globalThis.navigator, 'storage', {
+      configurable: true,
+      value: { persist: async () => (asked = true) },
+    })
+    try {
+      KEY = await generateGroupKey()
+      await serve(KEY)
+      await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+      assert.equal(asked, false)
+    } finally {
+      Object.defineProperty(globalThis.navigator, 'storage', {
+        configurable: true,
+        value: had,
+      })
+    }
   })
 
   test('a dead link says so instead of blanking', async () => {
