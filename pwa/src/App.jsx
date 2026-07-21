@@ -19,6 +19,7 @@ import { changePassword, enrol, logout as signOut, resume, signup } from './auth
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
+import { applyOption, splitOptions } from './copysplit'
 import { readView, viewHash } from './nav'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
 import { planRevive } from './revive'
@@ -1098,6 +1099,12 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
   // Everything displayed is folded from the ledger, client-side.
   const state = useMemo(() => computeState(events), [events])
   const suggestions = useMemo(() => simplify(state.balances), [state.balances])
+  // Distinct ratio splits already in this group's ledger, to reuse on a new
+  // expense. Excludes the one being edited so it can't copy from itself.
+  const savedSplits = useMemo(
+    () => splitOptions(state.ledger, state.members, { excludeId: editing?.expense_id }),
+    [state.ledger, state.members, editing]
+  )
   const meId = memberIdFor(state.members, me)
   // Look the viewed expense up live so edits/new comments show while it's open.
   const viewing = viewingId
@@ -1433,6 +1440,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
           me={me}
           ai={ai}
           initial={editing}
+          savedSplits={savedSplits}
           scanOnOpen={scanReceipt}
           onSubmit={submitExpense}
           onCancel={() => {
@@ -2009,6 +2017,7 @@ export function ExpenseForm({
   me,
   ai,
   initial,
+  savedSplits = [],
   scanOnOpen,
   onSubmit,
   onCancel,
@@ -2397,6 +2406,32 @@ export function ExpenseForm({
           )
         })}
       </fieldset>
+
+      {savedSplits.length > 0 && (
+        <label className="field">
+          copy a split
+          <select
+            value=""
+            onChange={(e) => {
+              const opt = savedSplits.find((o) => o.id === e.target.value)
+              if (!opt) return
+              // Stamp by value: set the three pieces of split state and let the
+              // ordinary submit path resolve them against this amount.
+              const s = applyOption(opt, members)
+              setMode(s.mode)
+              setWeights(s.weights)
+              setExcluded(s.excluded)
+            }}
+          >
+            <option value="">reuse a past split…</option>
+            {savedSplits.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <label className="field">
         split

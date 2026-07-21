@@ -534,3 +534,62 @@ describe('failures', () => {
     assert.ok(text().includes('disk full'))
   })
 })
+
+describe('copying a split from a past one', () => {
+  const THREE = [
+    { id: 1, display_name: 'v' },
+    { id: 2, display_name: 'd' },
+    { id: 3, display_name: 'm' },
+  ]
+  // Shaped exactly as copysplit.splitOptions produces them.
+  const SAVED = [
+    { id: 'rent', label: 'Rent · by shares', mode: 'shares', participantIds: [1, 2], weights: { 1: 3, 2: 1 } },
+  ]
+  const copyControl = () =>
+    byText('label', 'copy a split')?.querySelector('select')
+  // The mode select is the one offering split modes; the copy picker also
+  // exists now, so find by content rather than position.
+  const modeSelect = () =>
+    $$('select').find((s) => [...s.options].some((o) => o.value === 'items'))
+
+  const renderWith = (savedSplits) =>
+    mount(
+      <ExpenseForm
+        groupId={7}
+        members={THREE}
+        me={ME}
+        ai={{ active: null, providers: {} }}
+        savedSplits={savedSplits}
+        onSubmit={(e) => saved.push(e)}
+        onCancel={() => {}}
+      />
+    )
+
+  test('stamps the mode and weights, and resolves against the new amount', async () => {
+    await serve()
+    saved = []
+    await renderWith(SAVED)
+
+    await change(copyControl(), 'rent')
+    // The mode selector followed the stamp.
+    assert.equal(modeSelect().value, 'shares')
+
+    await change($('input'), 'This month')
+    await change(amountField(), '40.00')
+    await submit($('form'))
+
+    // 3:1 of $40 → $30 / $10, member 3 excluded entirely.
+    assert.deepEqual(saved[0].splits, [
+      { user_id: 1, share_cents: 3000 },
+      { user_id: 2, share_cents: 1000 },
+    ])
+    assert.deepEqual(saved[0].split, { mode: 'shares', weights: { 1: 3, 2: 1 } })
+  })
+
+  test('the picker is absent when there is nothing to copy', async () => {
+    await serve()
+    saved = []
+    await renderWith([])
+    assert.equal(copyControl(), undefined)
+  })
+})
