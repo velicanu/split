@@ -31,12 +31,18 @@ export function describeError(res, data) {
   return res.statusText || `Request failed (${res.status})`
 }
 
-export async function api(path, body, method) {
+export async function api(path, body, method, headers) {
   let res
   try {
     res = await fetch(`/api/${path}`, {
       method: method || (body ? 'POST' : 'GET'),
-      headers: body ? { 'Content-Type': 'application/json' } : {},
+      headers: {
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        // A read token lets someone with a share link but no account fetch the
+        // encrypted feed. It goes in a header, not the query string, so it does
+        // not end up in server logs or a Referer. See viewlink.js.
+        ...(headers || {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
     })
   } catch {

@@ -24,6 +24,7 @@ shared contract comes first because everything else conforms to it.
 | 11 | [Identity, devices & revocation](11-identity-and-devices.md) | The concrete slice under 06/07: challenge-signed auth with no server-side passwords, per-device keypairs, real device revocation, and the schema/endpoints/flows for each. |
 | 12 | [Ghosts, leaving & membership](12-membership.md) | One mechanism for people who don't use the app, who leave, and who lost their account: ghost members, ghosting as a fork, claim-on-join, and revive. |
 | 13 | [Receipt-scanning backends](13-receipt-scanning-backends.md) | All scanning through a backend (direct provider calls removed): a fixed image→JSON contract as the AGPL/licence boundary, group-scoped credentials sealed into the ledger, and real backend-side revocation. |
+| 14 | [Read-only sharing](14-read-only-sharing.md) | A link that lets anyone see a group without an account (an opt-in server read token gates the feed; the key rides in the fragment), and lets account-holders join — becoming a member or claiming a ghost. |
 
 ## Cross-cutting principles
 

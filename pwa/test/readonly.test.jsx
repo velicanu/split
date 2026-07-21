@@ -1,0 +1,120 @@
+// The account-less read-only view behind a share link: it fetches with the
+// read token, decrypts with the key from the link (no device key), folds, and
+// shows the group — with no way to edit anything. See readonly.js, viewlink.js.
+import assert from 'node:assert/strict'
+import { afterEach, describe, test } from 'node:test'
+
+import { ReadOnlyGroup } from '../src/App.jsx'
+import { encryptPayload, generateGroupKey } from '../src/crypto.js'
+import { forgetGroupKeys } from '../src/groupkeys.js'
+import { $$, byText, mount, text, unmount } from './react.mjs'
+
+const member = (id, name) => ({
+  id,
+  type: 'member.added',
+  payload: { user_id: id, display_name: name },
+})
+
+async function serve(key, extra = [], { name = 'Trip' } = {}) {
+  const dinner = {
+    id: 3,
+    type: 'expense.created',
+    payload: {
+      enc: await encryptPayload(key, {
+        expense_id: 'e1',
+        description: 'Dinner at the pier',
+        amount_cents: 1000,
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: 2, share_cents: 500 },
+        ],
+        date: '2026-01-01',
+      }),
+    },
+  }
+  const events = [member(1, 'v'), member(2, 'd'), dinner, ...extra]
+  const json = (b) => ({ ok: true, json: async () => b })
+  globalThis.fetch = async (url, opts) => {
+    const p = String(url)
+    // The token has to be present — this path exists only for read-token access.
+    if (!opts?.headers?.['X-Read-Token']) return { ok: false, status: 401, json: async () => ({}) }
+    if (p.match(/\/api\/groups\/7$/)) return json({ id: 7, name, read_only: true })
+    if (p.includes('/events')) return json({ version: events.at(-1).id, events })
+    return { ok: false, status: 404, json: async () => ({}) }
+  }
+}
+
+const link = (over = {}) => ({ groupId: 7, gk: KEY, readToken: 'rt', code: 'abc', ...over })
+let KEY
+
+afterEach(async () => {
+  await unmount()
+  forgetGroupKeys()
+})
+
+describe('the read-only share view', () => {
+  test('decrypts and shows the group with no account', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY)
+    await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+
+    assert.ok(text().includes('Trip'), 'the group name')
+    assert.ok(text().includes('Dinner at the pier'), 'the expense, decrypted')
+    assert.ok(text().includes('is owed $5.00'), 'balances are folded')
+    assert.ok(text().includes('owes $5.00'))
+    assert.ok(text().includes('read-only'))
+  })
+
+  test('offers no way to edit anything', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY)
+    await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+
+    assert.equal(byText('h3', 'Add an expense'), undefined)
+    assert.equal(byText('button', 'edit'), undefined)
+    assert.equal(byText('button', 'delete'), undefined)
+    assert.equal(byText('button', 'Settle up'), undefined)
+  })
+
+  test('a signed-in visitor is offered how to join', async () => {
+    KEY = await generateGroupKey()
+    // A ghost in the split, so "I'm <name>" appears alongside join-as-new.
+    const ghost = {
+      id: 4,
+      type: 'member.ghost_added',
+      payload: { enc: await encryptPayload(KEY, { member_id: -5, display_name: 'Sam' }) },
+    }
+    await serve(KEY, [ghost])
+    await mount(
+      <ReadOnlyGroup link={link()} user={{ id: 9 }} onExit={() => {}} />
+    )
+    assert.ok(byText('button', 'Join as a new member'))
+    assert.ok(byText('button', 'Sam'), 'and claiming the ghost')
+  })
+
+  test('a visitor with no account is pointed at signing in', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY)
+    await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+    assert.ok(text().includes('Sign in to join'))
+    assert.equal(byText('button', 'Join as a new member'), undefined)
+  })
+
+  test('a link with no join code is view-only, even signed in', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY)
+    await mount(
+      <ReadOnlyGroup link={link({ code: null })} user={{ id: 9 }} onExit={() => {}} />
+    )
+    assert.equal(byText('button', 'Join as a new member'), undefined)
+    assert.ok(text().includes('read-only'))
+  })
+
+  test('a dead link says so instead of blanking', async () => {
+    KEY = await generateGroupKey()
+    globalThis.fetch = async () => ({ ok: false, status: 403, json: async () => ({ detail: 'invalid' }) })
+    await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+    assert.ok(text().includes('not valid'))
+  })
+})

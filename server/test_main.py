@@ -814,3 +814,151 @@ def test_hiding_needs_membership():
     group = owner.post("/api/groups", json={"name": "Trip"}).json()
     stranger = signed_up("hm-stranger")
     assert stranger.post(f"/api/groups/{group['id']}/hide").status_code == 404
+
+
+def _anon():
+    """A client with no session — a stranger with only a share link."""
+    from fastapi.testclient import TestClient
+    from main import app
+
+    return TestClient(app, base_url="https://testserver")
+
+
+def _enable_read_sharing(owner, gid, rotate=False):
+    return owner.post(
+        f"/api/groups/{gid}/read-sharing", json={"enabled": True, "rotate": rotate}
+    ).json()["read_token"]
+
+
+def test_read_token_lets_a_stranger_read_but_gives_no_account():
+    """The point of the feature: someone with the share link, no account, can
+    fetch the encrypted feed and the group name — and nothing else."""
+    owner = signed_up("rt-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    owner.post(
+        f"/api/groups/{gid}/events",
+        json={
+            "event_id": "rt-read-e1",
+            "type": "expense.created",
+            "payload": {"enc": "x"},
+        },
+    )
+    token = _enable_read_sharing(owner, gid)
+    assert token
+
+    anon = _anon()
+    h = {"X-Read-Token": token}
+    feed = anon.get(f"/api/groups/{gid}/events", headers=h)
+    assert feed.status_code == 200
+    types = [e["type"] for e in feed.json()["events"]]
+    assert "member.added" in types and "expense.created" in types
+
+    meta = anon.get(f"/api/groups/{gid}", headers=h).json()
+    assert meta["name"] == "Trip"
+    assert meta.get("read_only") is True
+    # The join code is the write capability; it is never handed to a reader.
+    assert "code" not in meta
+
+
+def test_no_token_and_no_session_cannot_read():
+    owner = signed_up("rt-closed")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    # Sharing not enabled, and no session: 401 (not logged in).
+    assert _anon().get(f"/api/groups/{gid}/events").status_code == 401
+
+
+def test_a_wrong_or_revoked_token_is_refused():
+    owner = signed_up("rt-revoke")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    token = _enable_read_sharing(owner, gid)
+    anon = _anon()
+
+    assert (
+        anon.get(
+            f"/api/groups/{gid}/events", headers={"X-Read-Token": "nope"}
+        ).status_code
+        == 403
+    )
+
+    # Disabling revokes the live link.
+    owner.post(f"/api/groups/{gid}/read-sharing", json={"enabled": False})
+    assert (
+        anon.get(
+            f"/api/groups/{gid}/events", headers={"X-Read-Token": token}
+        ).status_code
+        == 403
+    )
+
+
+def test_rotating_mints_a_new_token_and_kills_the_old():
+    owner = signed_up("rt-rotate")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    old = _enable_read_sharing(owner, gid)
+    new = _enable_read_sharing(owner, gid, rotate=True)
+    assert new and new != old
+
+    anon = _anon()
+    assert (
+        anon.get(f"/api/groups/{gid}/events", headers={"X-Read-Token": old}).status_code
+        == 403
+    )
+    assert (
+        anon.get(f"/api/groups/{gid}/events", headers={"X-Read-Token": new}).status_code
+        == 200
+    )
+
+
+def test_a_reader_cannot_write_or_manage_sharing():
+    owner = signed_up("rt-ro")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    token = _enable_read_sharing(owner, gid)
+    anon = _anon()
+    h = {"X-Read-Token": token}
+
+    # No session, so writing and managing both fail on auth — the token only reads.
+    assert (
+        anon.post(
+            f"/api/groups/{gid}/events",
+            headers=h,
+            json={
+                "event_id": "rt-ro-z",
+                "type": "expense.created",
+                "payload": {"enc": "x"},
+            },
+        ).status_code
+        == 401
+    )
+    assert anon.get(f"/api/groups/{gid}/read-sharing", headers=h).status_code == 401
+    assert (
+        anon.post(
+            f"/api/groups/{gid}/read-sharing", headers=h, json={"enabled": False}
+        ).status_code
+        == 401
+    )
+
+
+def test_only_a_writable_member_manages_sharing():
+    owner = signed_up("rts-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    stranger = signed_up("rts-stranger")
+    assert (
+        stranger.post(
+            f"/api/groups/{gid}/read-sharing", json={"enabled": True}
+        ).status_code
+        == 404
+    )
+
+
+def test_members_still_read_without_a_token():
+    # Regression: adding the token path must not disturb the member path.
+    owner = signed_up("rt-member")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    assert owner.get(f"/api/groups/{gid}/events").status_code == 200
+    assert owner.get(f"/api/groups/{gid}").json()["code"] == group["code"]
