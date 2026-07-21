@@ -2391,12 +2391,15 @@ export function ExpenseForm({
       {/* Keeping the receipt needs no API key. Scanning is a separate,
           optional step on top — and either one can start an expense, so
           neither is hidden behind picking a split mode first. */}
+      {/* No `capture`: it forces the camera on mobile and hides the file
+          picker. Without it the OS offers both — take a photo, or choose an
+          image you already have — which is what people want for a receipt
+          that arrived by email or is already in their camera roll. */}
       <label className="scan">
         {uploading ? 'uploading…' : '📎 add a receipt'}
         <input
           type="file"
           accept="image/*"
-          capture="environment"
           disabled={uploading || scanning}
           onChange={attach}
         />
@@ -2411,7 +2414,6 @@ export function ExpenseForm({
           <input
             type="file"
             accept="image/*"
-            capture="environment"
             disabled={uploading || scanning}
             onChange={scanNew}
           />

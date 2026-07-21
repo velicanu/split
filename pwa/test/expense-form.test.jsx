@@ -347,6 +347,18 @@ describe('the receipt controls', () => {
     assert.ok(attachControl(), 'keeping a receipt must not need an API key')
     assert.equal(scanControl(), undefined)
   })
+
+  test('take an image or choose an existing file — not camera-only', async () => {
+    // `capture` forces the camera on mobile and hides the file picker, so a
+    // receipt already on the phone (emailed, screenshotted) could not be used.
+    // Both controls accept images and neither pins the source.
+    await serve()
+    await render()
+    for (const input of [attachControl(), scanControl()]) {
+      assert.equal(input.getAttribute('accept'), 'image/*')
+      assert.ok(!input.hasAttribute('capture'), 'the source is not forced')
+    }
+  })
 })
 
 describe('attaching a receipt without scanning', () => {
