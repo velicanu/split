@@ -962,3 +962,32 @@ def test_members_still_read_without_a_token():
     gid = group["id"]
     assert owner.get(f"/api/groups/{gid}/events").status_code == 200
     assert owner.get(f"/api/groups/{gid}").json()["code"] == group["code"]
+
+
+def test_a_read_token_can_fetch_receipts_too():
+    """Read-only viewers see receipt images: the blob endpoint accepts the read
+    token like the feed does. The blob is opaque and content-addressed, so this
+    reveals nothing a feed reader couldn't already infer."""
+    owner = signed_up("rcpt-share")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    ciphertext, rid = sealed(b"a receipt for a share-link viewer")
+    owner.post(
+        f"/api/groups/{gid}/receipts",
+        json={"receipt_id": rid, "ciphertext": ciphertext},
+    )
+    token = _enable_read_sharing(owner, gid)
+
+    h = {"X-Read-Token": token}
+    got = _anon().get(f"/api/groups/{gid}/receipts/{rid}", headers=h)
+    assert got.status_code == 200
+    assert got.content == base64.b64decode(ciphertext)
+
+    # No token and no session, or a wrong token, get nothing.
+    assert _anon().get(f"/api/groups/{gid}/receipts/{rid}").status_code == 401
+    assert (
+        _anon()
+        .get(f"/api/groups/{gid}/receipts/{rid}", headers={"X-Read-Token": "no"})
+        .status_code
+        == 403
+    )

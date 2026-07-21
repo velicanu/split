@@ -5,9 +5,15 @@ import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
 import { ReadOnlyGroup } from '../src/App.jsx'
-import { encryptPayload, generateGroupKey } from '../src/crypto.js'
+import {
+  contentId,
+  encryptBytes,
+  encryptPayload,
+  generateGroupKey,
+} from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
-import { $$, byText, click, mount, text, unmount } from './react.mjs'
+import { forgetReceipts } from '../src/receipts.js'
+import { $, $$, byText, click, mount, text, unmount } from './react.mjs'
 
 const member = (id, name) => ({
   id,
@@ -15,7 +21,14 @@ const member = (id, name) => ({
   payload: { user_id: id, display_name: name },
 })
 
-async function serve(key, extra = [], { name = 'Trip' } = {}) {
+async function serve(key, extra = [], { name = 'Trip', receipt = false } = {}) {
+  const blobs = new Map()
+  let receiptId = null
+  if (receipt) {
+    const sealed = await encryptBytes(key, new Uint8Array([1, 2, 3, 4]))
+    receiptId = await contentId(sealed)
+    blobs.set(receiptId, sealed)
+  }
   const dinner = {
     id: 3,
     type: 'expense.created',
@@ -30,6 +43,7 @@ async function serve(key, extra = [], { name = 'Trip' } = {}) {
           { user_id: 2, share_cents: 500 },
         ],
         date: '2026-01-01',
+        receipts: receiptId ? [receiptId] : [],
       }),
     },
   }
@@ -41,6 +55,11 @@ async function serve(key, extra = [], { name = 'Trip' } = {}) {
     if (!opts?.headers?.['X-Read-Token']) return { ok: false, status: 401, json: async () => ({}) }
     if (p.match(/\/api\/groups\/7$/)) return json({ id: 7, name, read_only: true })
     if (p.includes('/events')) return json({ version: events.at(-1).id, events })
+    if (p.includes('/receipts/')) {
+      const bytes = blobs.get(p.split('/receipts/')[1])
+      if (!bytes) return { ok: false, status: 404, json: async () => ({}) }
+      return { ok: true, arrayBuffer: async () => bytes.buffer.slice(0) }
+    }
     return { ok: false, status: 404, json: async () => ({}) }
   }
 }
@@ -51,6 +70,7 @@ let KEY
 afterEach(async () => {
   await unmount()
   forgetGroupKeys()
+  forgetReceipts()
 })
 
 describe('the read-only share view', () => {
@@ -154,6 +174,24 @@ describe('the read-only share view', () => {
         configurable: true,
         value: had,
       })
+    }
+  })
+
+  test('shows a receipt image, fetched with the read token and link key', async () => {
+    KEY = await generateGroupKey()
+    await serve(KEY, [], { receipt: true })
+    const realCreate = URL.createObjectURL
+    const realRevoke = URL.revokeObjectURL
+    URL.createObjectURL = () => 'blob:stub'
+    URL.revokeObjectURL = () => {}
+    try {
+      await mount(<ReadOnlyGroup link={link()} user={null} onExit={() => {}} />)
+      await click(byText('button', 'Dinner at the pier'))
+      assert.ok(byText('h4', 'Receipts'), 'the receipts section is shown')
+      assert.ok($('img.receipt-thumb'), 'and the image decrypted and rendered')
+    } finally {
+      URL.createObjectURL = realCreate
+      URL.revokeObjectURL = realRevoke
     }
   })
 

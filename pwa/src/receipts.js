@@ -39,12 +39,19 @@ export async function uploadReceipt(groupId, file) {
   return receipt_id
 }
 
-/** Fetch, verify, decrypt. Returns the plaintext image bytes. */
-export async function fetchReceipt(groupId, receiptId) {
-  const key = await groupKey(groupId)
+/** Fetch, verify, decrypt. Returns the plaintext image bytes.
+ *
+ *  `access` lets a read-only share-link viewer read receipts too: they have no
+ *  stored group key and no session, so the key comes from the link and the read
+ *  token authorises the fetch. Absent it, the normal member path — this device's
+ *  stored key, its session cookie. See readonly.js. */
+export async function fetchReceipt(groupId, receiptId, access = {}) {
+  const key = access.key || (await groupKey(groupId))
   if (!key) throw new Error('No key for this group on this device')
 
-  const res = await fetch(`/api/groups/${groupId}/receipts/${receiptId}`)
+  const res = await fetch(`/api/groups/${groupId}/receipts/${receiptId}`, {
+    headers: access.readToken ? { 'X-Read-Token': access.readToken } : {},
+  })
   if (!res.ok) throw new Error("Couldn't load that receipt")
   const sealed = new Uint8Array(await res.arrayBuffer())
 
@@ -60,9 +67,11 @@ export async function fetchReceipt(groupId, receiptId) {
 // out rather than minted per render.
 const urls = new Map()
 
-export async function receiptUrl(groupId, receiptId) {
+export async function receiptUrl(groupId, receiptId, access) {
   if (urls.has(receiptId)) return urls.get(receiptId)
-  const bytes = await fetchReceipt(groupId, receiptId)
+  // The id is the content hash and the group key is the same however it was
+  // obtained, so the decrypted result is identical — caching by id alone is safe.
+  const bytes = await fetchReceipt(groupId, receiptId, access)
   const url = URL.createObjectURL(new Blob([bytes], { type: MEDIA_TYPE }))
   urls.set(receiptId, url)
   return url

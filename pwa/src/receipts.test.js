@@ -25,7 +25,7 @@ async function serve() {
   await saveDeviceKey(device)
   const key = await generateGroupKey()
   const sealedKey = await sealTo(device.box_pubkey, key)
-  const store = { blobs: new Map(), uploaded: [] }
+  const store = { blobs: new Map(), uploaded: [], key, readTokenSeen: undefined }
 
   globalThis.fetch = async (url, options) => {
     const path = String(url)
@@ -50,6 +50,7 @@ async function serve() {
       return { ok: true, json: async () => ({ receipt_id: body.receipt_id }) }
     }
     if (path.includes('/receipts/')) {
+      store.readTokenSeen = options?.headers?.['X-Read-Token']
       const bytes = store.blobs.get(path.split('/receipts/')[1])
       if (!bytes) return { ok: false, status: 404, json: async () => ({}) }
       return { ok: true, arrayBuffer: async () => bytes.buffer.slice(0) }
@@ -137,5 +138,23 @@ describe('fetching a receipt', () => {
     const foreign = await serve()
     foreign.blobs.set(id, store.blobs.get(id))
     await assert.rejects(() => fetchReceipt(7, id), /Could not decrypt/)
+  })
+})
+
+
+describe('a share-link viewer reading a receipt', () => {
+  test('uses the key from the link and sends the read token', async () => {
+    // The viewer has no device key or session: the key comes from the link and
+    // the read token authorises the members-only blob endpoint. See readonly.js.
+    const store = await serve()
+    const id = await uploadReceipt(7, { name: 'r.jpg' })
+
+    // Forget the device/group key entirely — the viewer never had one.
+    forgetGroupKeys()
+    await import('./crypto.js').then((m) => m.forgetDeviceKey())
+
+    const bytes = await fetchReceipt(7, id, { key: store.key, readToken: 'rt-secret' })
+    assert.deepEqual([...bytes], PLAINTEXT, 'decrypted with the link key')
+    assert.equal(store.readTokenSeen, 'rt-secret', 'and the token went in the header')
   })
 })

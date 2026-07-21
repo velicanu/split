@@ -1053,10 +1053,11 @@ def upload_receipt(group_id: int, body: ReceiptIn, request: Request):
 
 @app.get("/api/groups/{group_id}/receipts/{receipt_id}")
 def get_receipt(group_id: int, receipt_id: str, request: Request):
-    user = require_user(request)
     with db() as conn:
-        # Membership first: whether a given blob exists is itself information.
-        require_member(conn, group_id, user["id"])
+        # A member, or a read-token viewer — same read capability as the feed.
+        # The blob is opaque and content-addressed either way; whether it exists
+        # is only revealed once you can already read the group.
+        read_access(conn, group_id, request)
         row = conn.execute(
             "SELECT bytes FROM receipts WHERE group_id = ? AND id = ?",
             (group_id, receipt_id),
