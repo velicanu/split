@@ -1,14 +1,27 @@
 # 13 — Receipt-scanning backends
 
-Today a receipt is scanned by calling an LLM provider straight from the browser
-with a per-device API key (see [09](09-ai-features.md) and `pwa/src/ai.js`,
-`pwa/src/aikeys.js`). This adds a second kind of scanner: a **backend API** that
-does the inference, so a group can share scanning without every member holding a
-provider key — and, unlike the direct path, access to it can be **revoked for
-real**.
+All receipt scanning goes through a **scanner backend**: a service that takes an
+image and returns the line items and totals. The browser calls it over one fixed
+contract; the app never talks to an LLM provider directly.
 
-The two coexist. Both produce the exact same receipt JSON, so everything
-downstream of `extractReceipt` is unchanged.
+Today it does the opposite — the browser calls OpenAI or Anthropic straight,
+with a per-device provider key (`pwa/src/ai.js`, `pwa/src/aikeys.js`). **That
+direct path is removed when this plan is implemented**, not kept alongside. The
+reasons it goes rather than staying as an option:
+
+- **Sharing needs revocation, and a raw provider key can't give it.** A group
+  scanner means one member sets it up and everyone scans. With a shared provider
+  key, "revoke" can only mean rotating the one key at the provider — all-or-
+  nothing, killing every group and the setter's own use, and useless against a
+  member who already copied it. Per-group revocation needs per-group
+  credentials, which only a backend we define can mint. The direct path is
+  structurally unable to offer the one property the feature exists for.
+- **One code path.** Dropping it removes the provider registry, the per-provider
+  request/response branches, and the per-provider key endpoints and columns
+  (~340 lines of client provider plumbing plus its server side), leaving a
+  single credential kind and a single call.
+- **Uniform security.** Every scanner becomes a token against a backend that can
+  revoke, so there is no "personal scanners can't be revoked" corner left.
 
 ## The fixed contract
 
@@ -33,9 +46,9 @@ Content-Type: application/json
 ```
 
 The response is exactly what the model is asked for today (`pwa/src/ai.js`, the
-`RECEIPT_SCHEMA`), so `extractReceipt` gains a branch — direct provider vs
-endpoint — and returns the same object either way. The image is a downscaled
-JPEG, as `prepareImage` already produces.
+`RECEIPT_SCHEMA`), so `extractReceipt` keeps its signature and everything
+downstream of it is unchanged — only its body changes from a provider call to
+this one. The image is a downscaled JPEG, as `prepareImage` already produces.
 
 Nothing here touches the Split backend. The scan request goes from the browser
 straight to the scanner backend; Split relays only the sealed config below and
@@ -44,10 +57,12 @@ else ([05](05-backend-relay.md), [06](06-e2e-encryption.md)).
 
 ## Two scopes: personal and group
 
-A **personal scanner** is a member's own credential with a backend, held exactly
-like a provider API key is today: sealed to their account and each of their
-devices, opened only on-device, never readable by the Split server
-(`pwa/src/aikeys.js`). Only that member uses it.
+A **personal scanner** is a member's own backend token, held the way a provider
+key is today: sealed to their account and each of their devices, opened only
+on-device, never readable by the Split server (reuse `pwa/src/aikeys.js`, minus
+everything provider-specific). Only that member uses it. The token is a
+credential with the scanner backend, not with an LLM provider — that is the only
+change from today's storage.
 
 A **group scanner** is one shared configuration a whole group can scan with. It
 is the point of this document, and its security rests on one decision:
@@ -66,8 +81,35 @@ A group-scoped credential has neither problem: extracting it grants only what a
 member of that group already has — scanning for that group — and revoking the
 group invalidates exactly it.
 
-This is what makes revocation real, and it is the reason this feature is worth
-building over the direct path rather than beside it.
+This is what makes revocation real, and it is the reason the whole feature is a
+backend rather than a shared key.
+
+### The contract is also the licence boundary
+
+The scanner backend lives in a **separate repo** and shares only the HTTP+JSON
+contract above with this one. That is deliberate on three axes at once, and they
+line up rather than fight:
+
+- **Licence.** This repo is AGPL. AGPL copyleft reaches works *combined into* the
+  program (shared code, linking, one process); it does not reach an independent
+  program that merely talks to it over a network protocol — the FSF's settled
+  position, and AGPL's section 13 network clause is about the AGPL'd work being
+  served over a network, not about anything it calls. So a backend that (1) is a
+  separate repo, (2) shares only the contract, and (3) copies no AGPL code, is a
+  separate work. We and any self-hoster may licence it however we like — closed,
+  permissive, proprietary model behind it — and keep its source private. The app
+  stays AGPL and keeps its guarantees; the AI service is unencumbered.
+- **Trust.** The Split relay stays end-to-end blind; the scanner is a distinct
+  trust domain a group opts into, like choosing a provider today.
+- **Revocation.** The per-group credential boundary above.
+
+The same seam carries all three, which is the usual sign it is drawn in the
+right place. Two conditions keep the licence separation clean: **do not copy
+AGPL code across it** (a shared validator must be its own permissively-licensed
+package, not lifted from this repo), and it must be a genuine independent service
+— which a receipt scanner with standalone utility is, not a contrivance. This is
+not legal advice; a real licence decision wants a lawyer, but the boundary is the
+ordinary microservice kind.
 
 ### Revocation lives at the backend, not in the ledger
 
@@ -144,6 +186,22 @@ is only meaningful to someone who has a personal scanner to prefer.
   group-scoped credential is the whole point — but it is not zero, and revoke is
   the control, not secrecy.
 
+## What implementing this removes
+
+Not additive — the direct-provider path is deleted, not left as a fallback:
+
+- `pwa/src/ai.js` loses the per-provider request/response branches (the
+  Anthropic and OpenAI calls) and the `PROVIDERS` registry; `extractReceipt`
+  keeps its name and shape but calls the `/scan` contract.
+- `pwa/src/aikeys.js` keeps the sealing machinery but loses everything keyed by
+  provider — a scanner is one token, not a per-provider map.
+- The server's per-provider AI endpoints and columns
+  (`ai/providers/{provider}/…`, the provider/model settings) collapse to a
+  single scanner config per account.
+
+WIP data is disposable and the schema resets on deploy, so this is a straight
+removal with no migration.
+
 ## Deliberately not doing
 
 - **Per-member metering or attribution** inside a group. The backend sees one
@@ -153,6 +211,11 @@ is only meaningful to someone who has a personal scanner to prefer.
 - **Adapting to arbitrary third-party inference APIs.** The contract is fixed;
   a backend conforms or is not usable. Adapters are a maintenance surface we are
   choosing not to open.
+- **A first-party hosted backend, decided here.** Whether the project runs a
+  turnkey scanner or leaves everyone to bring their own is an operational and
+  cost question, out of scope for this design — which only fixes the contract so
+  either works. Someone must run *a* conforming backend for scanning to exist;
+  that is the one hard dependency this creates.
 - **Routing scans through the Split backend.** Its non-involvement is the
   property worth protecting; the scanner backend is a separate trust domain the
-  group opts into, exactly like choosing a provider today.
+  group opts into.
