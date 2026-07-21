@@ -171,6 +171,18 @@ afterEach(async () => {
 })
 
 describe('signing up', () => {
+  test('starts clean, dropping any previous account’s cached ledger', async () => {
+    // A brand-new identity inherits nothing on this device — otherwise events
+    // an earlier account cached, keyed differently, read as undecryptable.
+    fakeServer()
+    await saveGroupKey(1, 'old-account-key')
+    await append(1, { event_id: 'x', type: 'expense.created', payload: { enc: 'y' } })
+
+    await signup({ login_handle: 'fresh', display_name: 'F', password: 'pw' })
+    assert.deepEqual(await localEvents(1), [])
+    assert.ok(!(await localGroupKey(1)))
+  })
+
   test('keeps a device key locally and sends only public material', async () => {
     const server = fakeServer()
     const me = await signup({
@@ -278,6 +290,26 @@ describe('resuming on a device that already has a key', () => {
   test('returns null on a device that has never enrolled', async () => {
     fakeServer()
     assert.equal(await resume(), null)
+  })
+
+  test('a rejected device clears its orphaned local ledger', async () => {
+    // The reported bug: offline-first caches the ledger by group id. A server
+    // wipe (a dev-time schema bump) resets the DB, reuses group ids, and the
+    // old events — under the old key — then surface as undecryptable under the
+    // new group. A rejected device means the server is gone from under us, so
+    // its cache is orphaned and must go.
+    const server = fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await saveGroupKey(1, 'stale-key')
+    await append(1, { event_id: 'old', type: 'expense.created', payload: { enc: 'x' } })
+    assert.equal((await localEvents(1)).length, 1, 'the setup cached something')
+
+    const device = await loadDeviceKey()
+    delete server.devices[device.pubkey] // the wipe/revoke
+
+    assert.equal(await resume(), null)
+    assert.deepEqual(await localEvents(1), [], 'the stale ledger is gone')
+    assert.ok(!(await localGroupKey(1)), 'and the stale key with it')
   })
 })
 
