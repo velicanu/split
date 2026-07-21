@@ -21,6 +21,7 @@ import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
 import { applyOption, splitOptions } from './copysplit'
 import { readView, viewHash } from './nav'
+import { loadTheme, setTheme } from './theme'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
 import { planRevive } from './revive'
 import {
@@ -312,6 +313,26 @@ export function Home({ user, onLogout }) {
   )
 }
 
+// Light, dark, or follow the system — a device preference (theme.js). The
+// initial paint is themed by an inline script in index.html; this only changes
+// it live.
+export function ThemeToggle() {
+  const [theme, setThemeState] = useState(loadTheme)
+  return (
+    <label className="field">
+      Theme
+      <select
+        value={theme}
+        onChange={(e) => setThemeState(setTheme(e.target.value))}
+      >
+        <option value="system">System default</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  )
+}
+
 const maskKey = (key) => `…${String(key).slice(-4)}`
 
 // Provider settings. There is no default provider — with no keys the scanning
@@ -344,6 +365,10 @@ function Settings({ ai, user, onChanged, onClose }) {
       <button className="link" onClick={onClose}>
         ← back
       </button>
+
+      <h2>Appearance</h2>
+      <ThemeToggle />
+
       <h2>Receipt scanning</h2>
       <p className="muted">
         Add an API key to turn on receipt scanning. The key is stored on your

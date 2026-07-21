@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#16a34a" />
     <title>Split</title>
+    <script>
+      // Apply the saved theme before first paint, so there is no flash of the
+      // wrong one. Only light/dark force an attribute; system leaves it to the
+      // media query. Mirrors theme.js — kept tiny and standalone on purpose.
+      try {
+        var t = localStorage.getItem('split.theme')
+        if (t === 'light' || t === 'dark')
+          document.documentElement.setAttribute('data-theme', t)
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

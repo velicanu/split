@@ -1,3 +1,56 @@
+/* Colour tokens. Light is the default; dark is applied two ways that share one
+   palette: when the system prefers dark and the user hasn't forced light, and
+   when the user explicitly picks dark. The theme toggle (theme.js) sets
+   data-theme on <html>; absent it, the system decides. */
+:root {
+  color-scheme: light;
+  --bg: #f8fafc;
+  --fg: #0f172a;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --border: #cbd5e1;
+  --border-subtle: #e2e8f0;
+  --muted: #64748b;
+  --disabled: #94a3b8;
+  --accent: #16a34a;
+  --accent-fg: #ffffff;
+  --danger: #dc2626;
+  --backdrop: rgba(15, 23, 42, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: #0f172a;
+    --fg: #e2e8f0;
+    --surface: #1e293b;
+    --surface-2: #334155;
+    --border: #475569;
+    --border-subtle: #334155;
+    --muted: #94a3b8;
+    --disabled: #64748b;
+    --accent: #22c55e;
+    --accent-fg: #052e16;
+    --danger: #f87171;
+    --backdrop: rgba(0, 0, 0, 0.6);
+  }
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0f172a;
+  --fg: #e2e8f0;
+  --surface: #1e293b;
+  --surface-2: #334155;
+  --border: #475569;
+  --border-subtle: #334155;
+  --muted: #94a3b8;
+  --disabled: #64748b;
+  --accent: #22c55e;
+  --accent-fg: #052e16;
+  --danger: #f87171;
+  --backdrop: rgba(0, 0, 0, 0.6);
+}
+
 body {
   font-family: system-ui, sans-serif;
   margin: 0;
@@ -5,8 +58,8 @@ body {
   min-height: 100vh;
   align-items: center;
   justify-content: center;
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--bg);
+  color: var(--fg);
 }
 
 main {
@@ -24,7 +77,7 @@ form {
 
 input {
   padding: 0.6rem;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 1rem;
 }
@@ -33,14 +86,14 @@ button {
   padding: 0.6rem;
   border: none;
   border-radius: 6px;
-  background: #16a34a;
-  color: white;
+  background: var(--accent);
+  color: var(--accent-fg);
   font-size: 1rem;
   cursor: pointer;
 }
 
 .error {
-  color: #dc2626;
+  color: var(--danger);
 }
 
 main.app {
@@ -73,15 +126,15 @@ h3 {
 }
 
 .muted {
-  color: #64748b;
+  color: var(--muted);
 }
 
 .pos {
-  color: #16a34a;
+  color: var(--accent);
 }
 
 .neg {
-  color: #dc2626;
+  color: var(--danger);
 }
 
 .list {
@@ -100,9 +153,9 @@ h3 {
   gap: 0.75rem;
   width: 100%;
   padding: 0.6rem 0.75rem;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: white;
+  background: var(--surface);
   color: inherit;
   font-size: 1rem;
   text-align: left;
@@ -129,7 +182,7 @@ h3 {
   width: auto;
   padding: 0;
   background: none;
-  color: #16a34a;
+  color: var(--accent);
 }
 
 .field {
@@ -137,24 +190,24 @@ h3 {
   flex-direction: column;
   gap: 0.25rem;
   font-size: 0.9rem;
-  color: #64748b;
+  color: var(--muted);
 }
 
 select {
   padding: 0.55rem;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 1rem;
 }
 
 code {
-  background: #f1f5f9;
+  background: var(--surface-2);
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
 }
 
 .participants {
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
   display: flex;
@@ -163,7 +216,7 @@ code {
 }
 
 .participants legend {
-  color: #64748b;
+  color: var(--muted);
   font-size: 0.9rem;
   padding: 0 0.25rem;
 }
@@ -204,7 +257,7 @@ input.pay-amt {
 }
 
 .item {
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--border-subtle);
   padding-top: 0.5rem;
 }
 
@@ -233,11 +286,11 @@ input.pay-amt {
 
 .scan {
   display: block;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--border);
   border-radius: 6px;
   padding: 0.6rem;
   text-align: center;
-  color: #16a34a;
+  color: var(--accent);
   cursor: pointer;
 }
 
@@ -270,15 +323,15 @@ input.pay-amt {
   width: 72px;
   height: 72px;
   object-fit: cover;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #f1f5f9;
+  background: var(--surface-2);
 }
 
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(15, 23, 42, 0.45);
+  background: var(--backdrop);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -288,7 +341,7 @@ input.pay-amt {
 
 .modal {
   position: relative;
-  background: white;
+  background: var(--surface);
   border-radius: 10px;
   padding: 1.5rem;
   width: 100%;
@@ -329,11 +382,11 @@ input.pay-amt {
 }
 
 .link.danger {
-  color: #dc2626;
+  color: var(--danger);
 }
 
 .link:disabled {
-  color: #94a3b8;
+  color: var(--disabled);
   cursor: not-allowed;
 }
 
@@ -350,7 +403,7 @@ input.pay-amt {
 .log-payload {
   margin: 0.4rem 0 0;
   padding: 0.5rem;
-  background: #f1f5f9;
+  background: var(--surface-2);
   border-radius: 4px;
   font-size: 0.75rem;
   white-space: pre-wrap;
