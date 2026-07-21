@@ -19,6 +19,7 @@ import { changePassword, enrol, logout as signOut, resume, signup } from './auth
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
+import { currentView, readView, viewHash } from './nav'
 import { receiptBlob, receiptUrl, uploadReceipt } from './receipts'
 import { planRevive } from './revive'
 import {
@@ -180,12 +181,30 @@ function Auth({ onAuth }) {
   )
 }
 
-function Home({ user, onLogout }) {
-  const [groupId, setGroupId] = useState(null)
-  // An invite link opened while signed out: the fragment survives sign-in, so
-  // pick it up once there's an account to join with.
-  const [pendingInvite] = useState(() => parseInvite(window.location.hash))
-  const [showSettings, setShowSettings] = useState(false)
+export function Home({ user, onLogout }) {
+  // The fragment at load: an invite to consume, or a view to restore. Captured
+  // once, because clearing the invite key below mutates the address bar.
+  const openedAt = useState(() => window.location.hash)[0]
+  const [pendingInvite] = useState(() => parseInvite(openedAt))
+  // An invite takes over the fragment, so while one is pending there is no view
+  // to restore — land on the list and let the invite move us.
+  const restored = pendingInvite ? { view: 'list' } : readView(openedAt)
+
+  const [groupId, setGroupId] = useState(
+    restored.view === 'group' ? restored.id : null
+  )
+  const [showSettings, setShowSettings] = useState(restored.view === 'settings')
+
+  // Keep the fragment in step with the view, so a refresh returns here. Replace
+  // rather than push: navigating within the app should not stack history
+  // entries, and this also clears an invite's key from the address bar.
+  useEffect(() => {
+    const target = viewHash(currentView({ showSettings, groupId }))
+    const url = target || window.location.pathname
+    if (window.location.hash !== target) {
+      window.history.replaceState(null, '', url)
+    }
+  }, [groupId, showSettings])
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
 
@@ -211,10 +230,10 @@ function Home({ user, onLogout }) {
         if (!cancelled) setGroupId(g.id)
       } catch {
         // Already a member, or a stale link — the groups list still works.
-      } finally {
-        // Clear the key out of the address bar either way.
-        window.history.replaceState(null, '', window.location.pathname)
       }
+      // The key is already out of the address bar: the view effect replaced the
+      // fragment on mount, before this resolved. Landing in the group (or not)
+      // is all that is left to do.
     })()
     return () => {
       cancelled = true
