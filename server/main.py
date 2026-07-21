@@ -27,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def reset_if_stale(conn):
@@ -125,10 +125,17 @@ def init_db():
             " device_id TEXT NOT NULL REFERENCES devices(id))"
         )
         conn.execute(
+            # `read_token`, when set, is an opt-in read-only capability: anyone
+            # presenting it (no account, no membership) can fetch the encrypted
+            # feed and decrypt it with the group key from the share link. Off by
+            # default — sharing read to non-members is more public than an
+            # invite, so it is a deliberate switch. Clearing or rotating it
+            # revokes future fetches (not the key, which we never rotate).
             "CREATE TABLE IF NOT EXISTS groups ("
             " id INTEGER PRIMARY KEY,"
             " name TEXT NOT NULL,"
             " code TEXT UNIQUE NOT NULL,"
+            " read_token TEXT,"
             " created_by INTEGER NOT NULL REFERENCES users(id))"
         )
         # `until_event_id` is what makes ghosting a fork rather than a race.
@@ -277,6 +284,13 @@ class JoinGroup(BaseModel):
     code: str
     # The member id from the invite's `as=`, if it named one.
     claims: int | None = None
+
+
+class ReadSharingIn(BaseModel):
+    enabled: bool
+    # Mint a fresh token even if one exists — revoke the old link, hand out a
+    # new one — when re-enabling.
+    rotate: bool = False
 
 
 class EventIn(BaseModel):
@@ -613,6 +627,34 @@ def require_writable_member(conn, group_id: int, user_id: int):
         raise HTTPException(403, "you are no longer part of this group")
 
 
+READ_TOKEN_HEADER = "X-Read-Token"
+
+
+def read_access(conn, group_id: int, request: Request):
+    """Who may *read* a group's feed: a member, or anyone presenting the group's
+    read token. Returns the user row for a member, or None for a token reader
+    (who has no account). Raises if neither holds.
+
+    The token is checked with a constant-time compare, and only against this
+    group's own token — it is a per-group capability, not a master key."""
+    token = request.headers.get(READ_TOKEN_HEADER)
+    if token:
+        row = conn.execute(
+            "SELECT read_token FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        if (
+            row
+            and row["read_token"]
+            and secrets.compare_digest(row["read_token"], token)
+        ):
+            return None
+        raise HTTPException(403, "invalid or disabled read link")
+    # No token: fall back to the ordinary member path.
+    user = require_user(request)
+    require_member(conn, group_id, user["id"])
+    return user
+
+
 def split_equally(amount_cents: int, member_ids: list[int]) -> dict[int, int]:
     """Reference split: whole cents, remainder distributed to the lowest member
     ids deterministically so shares always sum to the total. The client mirrors
@@ -738,28 +780,34 @@ def join_group(body: JoinGroup, request: Request):
 
 @app.get("/api/groups/{group_id}")
 def get_group(group_id: int, request: Request):
-    user = require_user(request)
     with db() as conn:
-        require_member(conn, group_id, user["id"])
+        user = read_access(conn, group_id, request)
         group = conn.execute(
             "SELECT id, name, code FROM groups WHERE id = ?", (group_id,)
         ).fetchone()
+    # A token reader gets the name only. The join code is the write capability;
+    # it travels in the share link's fragment for account-holders, never handed
+    # out by this endpoint to someone reading anonymously.
+    if user is None:
+        return {"id": group["id"], "name": group["name"], "read_only": True}
     return {"id": group["id"], "name": group["name"], "code": group["code"]}
 
 
 @app.get("/api/groups/{group_id}/events")
 def get_events(group_id: int, request: Request, since: int = 0):
-    user = require_user(request)
     with db() as conn:
-        require_member(conn, group_id, user["id"])
+        user = read_access(conn, group_id, request)
         # A ghosted member is served the group frozen at the event that ghosted
         # them — never anything after. Capping here rather than deleting their
         # membership is what makes the cut deterministic: it is a position in
-        # the log, not whenever they happened to sync.
-        cut = conn.execute(
-            "SELECT until_event_id FROM memberships WHERE group_id = ? AND user_id = ?",
-            (group_id, user["id"]),
-        ).fetchone()["until_event_id"]
+        # the log, not whenever they happened to sync. A token reader is not a
+        # member and has no cut — they see the whole current feed.
+        cut = None
+        if user is not None:
+            cut = conn.execute(
+                "SELECT until_event_id FROM memberships WHERE group_id = ? AND user_id = ?",
+                (group_id, user["id"]),
+            ).fetchone()["until_event_id"]
         rows = conn.execute(
             "SELECT id, event_id, type, payload, author, created_at FROM events"
             " WHERE group_id = ? AND id > ? AND (? IS NULL OR id <= ?)"
@@ -866,6 +914,44 @@ def hide_group(group_id: int, request: Request, hidden: bool = True):
             (1 if hidden else 0, group_id, user["id"]),
         )
     return {"ok": True, "hidden": hidden}
+
+
+@app.get("/api/groups/{group_id}/read-sharing")
+def get_read_sharing(group_id: int, request: Request):
+    """The current read token, so a member can show or rebuild the share link.
+    Members only — a token reader must not be able to read the token itself."""
+    user = require_user(request)
+    with db() as conn:
+        require_writable_member(conn, group_id, user["id"])
+        row = conn.execute(
+            "SELECT read_token FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()
+    return {"read_token": row["read_token"]}
+
+
+@app.post("/api/groups/{group_id}/read-sharing")
+def set_read_sharing(group_id: int, body: ReadSharingIn, request: Request):
+    """Turn read-sharing on (minting a token if there is none, or rotating it)
+    or off (clearing it). A ghosted member can't touch it — writable members
+    only. Off is the default; this is the deliberate switch."""
+    user = require_user(request)
+    with db() as conn:
+        require_writable_member(conn, group_id, user["id"])
+        if not body.enabled:
+            conn.execute(
+                "UPDATE groups SET read_token = NULL WHERE id = ?", (group_id,)
+            )
+            return {"read_token": None}
+        current = conn.execute(
+            "SELECT read_token FROM groups WHERE id = ?", (group_id,)
+        ).fetchone()["read_token"]
+        token = current
+        if token is None or body.rotate:
+            token = secrets.token_urlsafe(16)
+            conn.execute(
+                "UPDATE groups SET read_token = ? WHERE id = ?", (token, group_id)
+            )
+    return {"read_token": token}
 
 
 @app.post("/api/groups/{group_id}/ghost")

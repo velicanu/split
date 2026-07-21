@@ -19,6 +19,8 @@ import { changePassword, enrol, logout as signOut, resume, signup } from './auth
 import { decryptPayload, encryptPayload } from './crypto'
 import { createGroupKey, groupKey, publishGroupKey } from './groupkeys'
 import { buildInviteLink, parseInvite } from './invite'
+import { buildViewLink, parseViewLink } from './viewlink'
+import { loadReadOnly } from './readonly'
 import { applyOption, splitOptions } from './copysplit'
 import { readView, viewHash } from './nav'
 import { loadTheme, setTheme } from './theme'
@@ -79,6 +81,9 @@ export default function App() {
 function Split() {
   const [user, setUser] = useState(null)
   const [checking, setChecking] = useState(true)
+  // A read-only share link is handled before the auth gate: the whole point is
+  // that someone with no account can still see the group. Captured once.
+  const viewLink = useState(() => parseViewLink(window.location.hash))[0]
 
   useEffect(() => {
     // If this device already holds a key there is nothing to type — it signs
@@ -90,8 +95,189 @@ function Split() {
   }, [])
 
   if (checking) return null
+  if (viewLink) {
+    return (
+      <ReadOnlyGroup
+        link={viewLink}
+        user={user}
+        onExit={() => {
+          // Drop the view link and reload into the ordinary app.
+          window.location.href = window.location.pathname
+          window.location.reload()
+        }}
+      />
+    )
+  }
   if (!user) return <Auth onAuth={setUser} />
   return <Home user={user} onLogout={() => setUser(null)} />
+}
+
+// The account-less read-only view behind a share link: fetch with the read
+// token, decrypt with the key from the link, fold, and show it — no edit
+// controls anywhere. An account-holder gets a Join affordance; anyone else is
+// pointed at signing in. See viewlink.js, readonly.js, plan/14.
+export function ReadOnlyGroup({ link, user, onExit }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [joining, setJoining] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    loadReadOnly(link)
+      .then((d) => live && setData(d))
+      .catch(
+        () =>
+          live &&
+          setError('This link is not valid — read-sharing may have been turned off.')
+      )
+    return () => {
+      live = false
+    }
+  }, [link])
+
+  async function join(claims) {
+    setJoining(true)
+    setError('')
+    try {
+      await api('groups/join', { code: link.code, claims: claims ?? null })
+      // Seal the key (from the link) to this account and device, so the group
+      // is readable the normal way from now on.
+      await publishGroupKey(link.groupId, link.gk)
+      window.location.href = `${window.location.pathname}#group/${link.groupId}`
+      window.location.reload()
+    } catch (err) {
+      setError(err.message)
+      setJoining(false)
+    }
+  }
+
+  if (error && !data) {
+    return (
+      <main className="app">
+        <header>
+          <strong className="brand" onClick={onExit}>
+            Split
+          </strong>
+        </header>
+        <p className="error">{error}</p>
+        <button className="link" onClick={onExit}>
+          go to Split
+        </button>
+      </main>
+    )
+  }
+  if (!data) return null
+
+  const { name, state, unreadable } = data
+  const ghosts = state.members.filter((m) => m.ghost)
+
+  return (
+    <main className="app">
+      <header>
+        <strong className="brand" onClick={onExit}>
+          Split
+        </strong>
+        <span className="spacer" />
+        <span className="muted">read-only</span>
+      </header>
+      <h2>{name}</h2>
+
+      {link.code && user ? (
+        <section>
+          <p className="muted">
+            You&rsquo;re viewing this group. Join to add and edit expenses.
+          </p>
+          {ghosts.length > 0 && (
+            <p className="muted">
+              If you&rsquo;re already in the split, join as that person:
+            </p>
+          )}
+          <div className="cols">
+            {ghosts.map((g) => (
+              <button key={g.id} disabled={joining} onClick={() => join(g.id)}>
+                I&rsquo;m {g.display_name}
+              </button>
+            ))}
+            <button disabled={joining} onClick={() => join(null)}>
+              Join as a new member
+            </button>
+          </div>
+        </section>
+      ) : link.code ? (
+        <p className="muted">
+          Sign in to join this group.{' '}
+          <button className="link" onClick={onExit}>
+            Open Split
+          </button>
+        </p>
+      ) : (
+        <p className="muted">A read-only view of this group.</p>
+      )}
+      {error && <p className="error">{error}</p>}
+
+      <h3>Balances</h3>
+      <ul className="list">
+        {state.balances.map((b) => (
+          <li key={b.user_id} className="row static">
+            <span>{b.display_name}</span>
+            <span className={b.net_cents >= 0 ? 'pos' : 'neg'}>
+              {b.net_cents === 0
+                ? 'settled up'
+                : b.net_cents > 0
+                  ? `is owed ${money(b.net_cents)}`
+                  : `owes ${money(-b.net_cents)}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <h3>Expenses</h3>
+      {state.ledger.length === 0 && <p className="muted">No expenses yet.</p>}
+      <ul className="list">
+        {state.ledger.map((x) => (
+          <li key={x.expense_id} className="row static">
+            <div className="expense">
+              <span>
+                {x.description}
+                {x.deleted ? ' (deleted)' : ''}
+              </span>
+              <span className="muted">
+                {x.payer_names.join(', ')} paid {money(x.amount_cents)} · split{' '}
+                {x.ways} way{x.ways === 1 ? '' : 's'}
+                {x.date ? ` · ${x.date}` : ''}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {state.payments.length > 0 && (
+        <>
+          <h3>Payments</h3>
+          <ul className="list">
+            {state.payments.map((p) => (
+              <li key={p.settlement_id} className="row static">
+                <span>
+                  {p.from_name} → {p.to_name}
+                </span>
+                <span className="muted">
+                  {money(p.amount_cents)}
+                  {p.date ? ` · ${p.date}` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {unreadable > 0 && (
+        <p className="error">
+          {unreadable} entr{unreadable === 1 ? 'y' : 'ies'} couldn&rsquo;t be
+          decrypted and {unreadable === 1 ? 'is' : 'are'} missing here.
+        </p>
+      )}
+    </main>
+  )
 }
 
 // No password ever reaches the server. Signing up mints an account key and a
@@ -601,6 +787,125 @@ function Devices() {
 // Inviting someone is inviting them to *be* a particular member. If they are
 // not in the group yet, a ghost is created for them first, so people can start
 // splitting with them before they accept. See plan/12.
+// Turn on an opt-in read-only link, and hand it out. The link carries the group
+// key (from this device) in its fragment and a server-issued read token; the
+// join code rides along so an account-holder opening it can also join. See
+// viewlink.js and plan/14.
+export function ShareReadOnly({ groupId, code }) {
+  const [token, setToken] = useState(null)
+  const [loaded, setLoaded] = useState(false)
+  const [link, setLink] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [error, setError] = useState('')
+
+  const buildLink = useCallback(
+    async (rt) => {
+      if (!rt) return setLink('')
+      const key = await groupKey(groupId)
+      setLink(
+        key
+          ? buildViewLink(window.location.origin, {
+              groupId,
+              gk: key,
+              readToken: rt,
+              code,
+            })
+          : ''
+      )
+    },
+    [groupId, code]
+  )
+
+  useEffect(() => {
+    api(`groups/${groupId}/read-sharing`)
+      .then((r) => {
+        setToken(r.read_token)
+        return buildLink(r.read_token)
+      })
+      .catch(() => {})
+      .finally(() => setLoaded(true))
+  }, [groupId, buildLink])
+
+  async function setSharing(enabled, rotate = false) {
+    setBusy(true)
+    setError('')
+    setCopied(false)
+    try {
+      const r = await api(`groups/${groupId}/read-sharing`, { enabled, rotate })
+      setToken(r.read_token)
+      await buildLink(r.read_token)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  if (!loaded) return null
+
+  return (
+    <div>
+      <h4>Read-only link</h4>
+      {token ? (
+        <>
+          <p className="muted">
+            Anyone with this link can see the group without an account. People
+            with an account can also join from it. Turning it off stops new
+            views — it can&rsquo;t un-share what someone already saw.
+          </p>
+          {link && (
+            <input
+              className="invite"
+              readOnly
+              value={link}
+              onFocus={(e) => e.target.select()}
+            />
+          )}
+          <div className="row-actions">
+            <button className="link" onClick={copy} disabled={!link}>
+              {copied ? 'copied' : 'copy'}
+            </button>
+            <button
+              className="link"
+              onClick={() => setSharing(true, true)}
+              disabled={busy}
+            >
+              new link
+            </button>
+            <button
+              className="link danger"
+              onClick={() => setSharing(false)}
+              disabled={busy}
+            >
+              turn off
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="muted">
+            Off. A read-only link lets people see this group without an account.
+          </p>
+          <button onClick={() => setSharing(true)} disabled={busy}>
+            Create read-only link
+          </button>
+        </>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  )
+}
+
 function InviteLink({ groupId, code, members, onAddGhost }) {
   const [link, setLink] = useState('')
   const [forMember, setForMember] = useState(null)
@@ -1411,6 +1716,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
         members={state.members}
         onAddGhost={addGhost}
       />
+      <ShareReadOnly groupId={groupId} code={meta.code} />
       {showLog && (
         <LedgerLog
           group={{ id: groupId, name: meta.name }}

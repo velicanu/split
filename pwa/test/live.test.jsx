@@ -171,4 +171,35 @@ describe('against a real server', { skip }, () => {
     assert.ok(!raw.includes('1234'))
     assert.ok(await groupKey(group.id), 'but this device can still read it')
   })
+
+  test('a read token serves the feed to a session-less reader', async () => {
+    // The whole read-only-sharing feature turns on the server accepting a
+    // token in place of a membership. Only a real server can confirm that.
+    await signup({
+      login_handle: handle('share'),
+      display_name: 'Sharer',
+      password: 'live-test-password',
+    })
+    const group = await api('groups', { name: 'Shared trip' })
+    const key = await createGroupKey(group.id)
+    await api(`groups/${group.id}/events`, {
+      event_id: crypto.randomUUID(),
+      type: 'expense.created',
+      payload: { enc: await encryptPayload(key, { expense_id: 'x', description: 'Lunch' }) },
+    })
+    const { read_token } = await api(`groups/${group.id}/read-sharing`, { enabled: true })
+    assert.ok(read_token)
+
+    // Drop the session entirely — a stranger with only the link.
+    jar = ''
+    const h = { 'X-Read-Token': read_token }
+    const feed = await api(`groups/${group.id}/events?since=0`, undefined, 'GET', h)
+    assert.ok(feed.events.some((e) => e.type === 'expense.created'), 'the reader gets the feed')
+    const meta = await api(`groups/${group.id}`, undefined, 'GET', h)
+    assert.equal(meta.read_only, true)
+    assert.ok(!('code' in meta), 'and not the join code')
+
+    // Without the token, the session-less reader gets nothing.
+    await assert.rejects(() => api(`groups/${group.id}/events?since=0`))
+  })
 })
