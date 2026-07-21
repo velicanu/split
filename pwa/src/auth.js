@@ -65,6 +65,11 @@ export async function signup({ login_handle, display_name, password }) {
   // Only stored once the server has accepted it, so a failed signup doesn't
   // leave a key behind that matches no account.
   await saveDeviceKey(device)
+  // A brand-new identity inherits nothing. Clear any ledger or group keys a
+  // previous account left on this device, so their differently-keyed events do
+  // not surface as undecryptable under this account's groups.
+  forgetGroupKeys()
+  await forgetLocalLedger()
   const me = await api('me')
   await saveSession(me)
   return me
@@ -87,10 +92,16 @@ export async function resume() {
       // no signal must not sign you out, still less delete your only key.
       return (await loadSession()) ?? null
     }
-    // The server rejected the key: revoked from another device. Drop it so the
-    // UI offers a fresh sign-in.
+    // The server rejected the key: this device is gone server-side — revoked
+    // from another device, or the server was reset out from under us. Either
+    // way its cached ledger and group keys are orphaned, and leaving them lets
+    // events from a previous life collide with a group that later reuses the
+    // same id (exactly what a dev-time wipe produces: they show up as
+    // undecryptable under the new group's key). Clear everything, as logout does.
     await forgetDeviceKey()
     await forgetSession()
+    forgetGroupKeys()
+    await forgetLocalLedger()
     return null
   }
 }
