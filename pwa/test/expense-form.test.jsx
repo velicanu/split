@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 
-import { ExpenseForm } from '../src/App.jsx'
+import { ExpenseForm } from '../src/components/ExpenseForm.jsx'
 import {
   contentId,
   encryptBytes,

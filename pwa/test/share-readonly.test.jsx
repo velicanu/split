@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
-import { ShareReadOnly } from '../src/App.jsx'
+import { ShareReadOnly } from '../src/components/sharing.jsx'
 import { generateGroupKey } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
 import { forgetLocalLedger, saveGroupKey } from '../src/store.js'
