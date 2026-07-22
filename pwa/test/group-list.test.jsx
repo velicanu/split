@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
-import { GroupList } from '../src/App.jsx'
+import { GroupList } from '../src/components/GroupList.jsx'
 import { forgetLocalLedger, localGroups, setMeta } from '../src/store.js'
 import { $$, byText, mount, text, unmount } from './react.mjs'
 

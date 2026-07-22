@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
-import { GroupView } from '../src/App.jsx'
+import { GroupView } from '../src/components/GroupView.jsx'
 import {
   contentId,
   decryptBytes,
