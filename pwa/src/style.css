@@ -16,6 +16,17 @@
   --accent-fg: #ffffff;
   --danger: #dc2626;
   --backdrop: rgba(15, 23, 42, 0.45);
+
+  /* Layout tokens (theme-independent). */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 0.75rem;
+  --space-lg: 1rem;
+  --space-xl: 1.5rem;
+  --space-2xl: 2rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -64,13 +75,20 @@ body {
 
 main {
   text-align: center;
-  padding: 2rem;
+  padding: var(--space-2xl);
 }
 
 form {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: var(--space-md);
+  width: 100%;
+}
+
+/* The sign-in screen centres a narrow form; every form inside the app is
+   full-width like the cards it sits among. Scoped, so the auth width no longer
+   leaks into the group and settings forms. */
+main:not(.app) form {
   width: 240px;
   margin: 0 auto;
 }
@@ -78,14 +96,14 @@ form {
 input {
   padding: 0.6rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 1rem;
 }
 
 button {
   padding: 0.6rem;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--accent);
   color: var(--accent-fg);
   font-size: 1rem;
@@ -101,14 +119,14 @@ main.app {
   width: 100%;
   max-width: 440px;
   align-self: flex-start;
-  padding: 1.5rem;
+  padding: var(--space-xl);
 }
 
 header {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
 }
 
 .brand {
@@ -150,11 +168,11 @@ h3 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--space-md);
   width: 100%;
   padding: 0.6rem 0.75rem;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--surface);
   color: inherit;
   font-size: 1rem;
@@ -168,7 +186,7 @@ h3 {
 
 .cols {
   display: flex;
-  gap: 1rem;
+  gap: var(--space-lg);
   flex-wrap: wrap;
 }
 
@@ -188,7 +206,7 @@ h3 {
 .field {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--space-xs);
   font-size: 0.9rem;
   color: var(--muted);
 }
@@ -196,23 +214,23 @@ h3 {
 select {
   padding: 0.55rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 1rem;
 }
 
 code {
   background: var(--surface-2);
   padding: 0.1rem 0.35rem;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .participants {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 0.5rem 0.75rem;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: var(--space-md);
 }
 
 .participants legend {
@@ -287,7 +305,7 @@ input.pay-amt {
 .scan {
   display: block;
   border: 1px dashed var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 0.6rem;
   text-align: center;
   color: var(--accent);
@@ -302,20 +320,20 @@ input.pay-amt {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: var(--space-md);
 }
 
 .receipt-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--space-sm);
 }
 
 .receipt-cell {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.25rem;
+  gap: var(--space-xs);
 }
 
 .receipt-thumb {
@@ -324,7 +342,7 @@ input.pay-amt {
   height: 72px;
   object-fit: cover;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   background: var(--surface-2);
 }
 
@@ -335,15 +353,15 @@ input.pay-amt {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 1.5rem;
+  padding: var(--space-xl);
   overflow-y: auto;
 }
 
 .modal {
   position: relative;
   background: var(--surface);
-  border-radius: 10px;
-  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
   width: 100%;
   max-width: 440px;
   text-align: left;
@@ -370,7 +388,7 @@ input.pay-amt {
 .row-actions {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: var(--space-md);
 }
 
 .row.deleted {
@@ -404,7 +422,7 @@ input.pay-amt {
   margin: 0.4rem 0 0;
   padding: 0.5rem;
   background: var(--surface-2);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-size: 0.75rem;
   white-space: pre-wrap;
   word-break: break-word;

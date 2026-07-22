@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test } from 'node:test'
 
-import { Home } from '../src/App.jsx'
+import { Home } from '../src/components/Home.jsx'
 import { forgetGroupKeys } from '../src/groupkeys.js'
 import { forgetLocalLedger } from '../src/store.js'
 import { act } from 'react'

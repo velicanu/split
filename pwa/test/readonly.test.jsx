@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
-import { ReadOnlyGroup } from '../src/App.jsx'
+import { ReadOnlyGroup } from '../src/components/ReadOnlyGroup.jsx'
 import {
   contentId,
   encryptBytes,
