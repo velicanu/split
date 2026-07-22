@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
-import { ThemeToggle } from '../src/App.jsx'
+import { ThemeToggle } from '../src/components/Settings.jsx'
 import { $, change, mount, unmount } from './react.mjs'
 
 afterEach(async () => {
