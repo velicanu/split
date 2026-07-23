@@ -96,16 +96,14 @@ own account-less endpoints:
 
 The group model is left completely untouched.
 
-## Unclaimed items are held aside, not spread
+## Unclaimed items split among everyone — same as a group
 
-Mid-claiming, some items are nobody's yet. In a group `receiptWeights` splits an
-unclaimed item across *everyone* (`targets = claimed.length ? claimed :
-participantIds`) — right for a settled expense, wrong for a live table, where it
-would silently bill you for a dish you didn't order. So the bill view feeds only
-claimed items into the maths and shows the rest as a visible **"unclaimed —
-$X.XX"** line. Each person owes only what they took; the host can see what's
-still up for grabs. Tax and tip follow the claimed items, so the unallocated
-remainder is honest too.
+An unclaimed item is split across *every* participant, exactly as
+`receiptWeights` already does it (`targets = claimed.length ? claimed :
+participantIds`). No special-casing for the bill: the same maths a group runs on
+a receipt-items expense run here unchanged, so the totals always add up to the
+bill and the behaviour matches what people already know. Claiming an item just
+narrows it from everyone to the claimants.
 
 ## Honest limits (the familiar family)
 
