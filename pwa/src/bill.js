@@ -32,7 +32,8 @@ const bytesToB64 = (bytes) => {
 // A random positive participant id, small enough to stay a safe integer. Each
 // browser mints its own — the server enforces uniqueness — so no coordination
 // is needed for two people to join at once. Mirrors the group's ghost ids.
-function randomId() {
+// Exported so the creation form can seed ghosts with ids the snapshot references.
+export function newParticipantId() {
   const a = new Uint32Array(2)
   crypto.getRandomValues(a)
   return a[0] * 8192 + (a[1] % 8192) + 1
@@ -157,7 +158,7 @@ export async function loadBill({ billId, key, token }) {
 
 /** Add yourself to a bill under a new name. Returns the identity to remember. */
 export async function joinBill({ billId, key, token }, name) {
-  const participant_id = randomId()
+  const participant_id = newParticipantId()
   const secret = randomSecret()
   await api(
     `bills/${billId}/participants`,

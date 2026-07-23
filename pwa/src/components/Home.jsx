@@ -12,6 +12,7 @@ import { useView } from '../useView'
 import { Settings } from './Settings'
 import { GroupList } from './GroupList'
 import { GroupView } from './GroupView'
+import { BillCreate } from './BillCreate'
 
 export function Home({ user, onLogout }) {
   // The fragment at load: an invite to consume, or a view to restore. Captured
@@ -25,6 +26,7 @@ export function Home({ user, onLogout }) {
   )
   const groupId = view.view === 'group' ? view.id : null
   const showSettings = view.view === 'settings'
+  const showNewBill = view.view === 'newbill'
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
 
@@ -103,6 +105,8 @@ export function Home({ user, onLogout }) {
           onChanged={loadAi}
           onClose={() => navigate({ view: 'list' })}
         />
+      ) : showNewBill ? (
+        <BillCreate ai={ai} onBack={() => navigate({ view: 'list' })} />
       ) : groupId != null ? (
         <GroupView
           groupId={groupId}
@@ -112,7 +116,15 @@ export function Home({ user, onLogout }) {
           onOpen={(id) => navigate({ view: 'group', id })}
         />
       ) : (
-        <GroupList onOpen={(id) => navigate({ view: 'group', id })} />
+        <>
+          <div className="row-actions">
+            {/* A one-off receipt split, standalone from any group. See plan/15. */}
+            <button className="link" onClick={() => navigate({ view: 'newbill' })}>
+              Split a bill
+            </button>
+          </div>
+          <GroupList onOpen={(id) => navigate({ view: 'group', id })} />
+        </>
       )}
     </main>
   )

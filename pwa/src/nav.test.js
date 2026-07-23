@@ -9,8 +9,9 @@ describe('reading a view from the fragment', () => {
     assert.deepEqual(readView('#'), { view: 'list' })
   })
 
-  test('settings and a group each name themselves', () => {
+  test('settings, a group, and the bill form each name themselves', () => {
     assert.deepEqual(readView('#settings'), { view: 'settings' })
+    assert.deepEqual(readView('#new-bill'), { view: 'newbill' })
     assert.deepEqual(readView('#group/7'), { view: 'group', id: 7 })
   })
 
@@ -41,6 +42,7 @@ describe('writing a view to a fragment', () => {
     for (const v of [
       { view: 'list' },
       { view: 'settings' },
+      { view: 'newbill' },
       { view: 'group', id: 7 },
       { view: 'group', id: -42 },
     ]) {

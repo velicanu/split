@@ -22,6 +22,13 @@ import { api } from '../src/api.js'
 import { encryptPayload } from '../src/crypto.js'
 import { createGroupKey, groupKey } from '../src/groupkeys.js'
 import { buildInviteLink, parseInvite } from '../src/invite.js'
+import {
+  claimGhost,
+  createBill,
+  loadBill,
+  newParticipantId,
+  setClaims,
+} from '../src/bill.js'
 
 const BASE = process.env.SPLIT_LIVE
 const skip = BASE ? false : 'set SPLIT_LIVE to a running server'
@@ -201,5 +208,58 @@ describe('against a real server', { skip }, () => {
 
     // Without the token, the session-less reader gets nothing.
     await assert.rejects(() => api(`groups/${group.id}/events?since=0`))
+  })
+
+  test('a shared bill: sealed create, account-less claim, folded split', async () => {
+    // The bill's whole point is that claiming needs no account. Only a real
+    // server can confirm the token gate, claim-once, and the sealed wire.
+    await signup({
+      login_handle: handle('bill'),
+      display_name: 'Host',
+      password: 'live-test-password',
+    })
+    const alex = newParticipantId()
+    const sam = newParticipantId()
+    const { billId, token, key } = await createBill({
+      snapshot: {
+        description: 'Live dinner',
+        items: [
+          { id: 'a', name: 'Distinctive pizza', price_cents: 1000 },
+          { id: 'b', name: 'Beer', price_cents: 600 },
+        ],
+        payers: [{ participant_id: alex, paid_cents: 1600 }],
+        tax_cents: 0,
+        tip_cents: 0,
+        total_cents: 1600,
+      },
+      participants: [
+        { participant_id: alex, name: 'Alexander' },
+        { participant_id: sam, name: 'Sam' },
+      ],
+    })
+
+    // What the server stored is opaque — the item, the name, the description.
+    const raw = JSON.stringify(
+      await api(`bills/${billId}`, undefined, 'GET', { 'X-Bill-Token': token })
+    )
+    assert.ok(!raw.includes('Distinctive pizza'), 'items are sealed')
+    assert.ok(!raw.includes('Alexander'), 'names are sealed')
+    assert.ok(!raw.includes('Live dinner'), 'the description is sealed')
+
+    // Drop the session: a stranger with only the link claims a ghost and their
+    // items, and it survives — the token is the whole capability.
+    jar = ''
+    const me = await claimGhost({ billId, token }, sam)
+    await setClaims({ billId, key, token }, sam, me.secret, ['b'])
+
+    const loaded = await loadBill({ billId, key, token })
+    // Beer 600 to Sam, plus half the unclaimed pizza (500) = 1100.
+    assert.equal(loaded.split.owed[sam], 1100)
+    assert.deepEqual(loaded.split.transfers, [
+      { from: sam, from_name: 'Sam', to: alex, to_name: 'Alexander', amount_cents: 1100 },
+    ])
+
+    // First claim wins: the same ghost cannot be taken twice.
+    await assert.rejects(() => claimGhost({ billId, token }, sam), /claimed|409/)
   })
 })
