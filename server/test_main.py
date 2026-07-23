@@ -991,3 +991,216 @@ def test_a_read_token_can_fetch_receipts_too():
         .status_code
         == 403
     )
+
+
+# --- shared bills (plan/15) --------------------------------------------
+
+
+def _make_bill(creator, snapshot="sealed-snapshot", participants=None, receipts=None):
+    r = creator.post(
+        "/api/bills",
+        json={
+            "snapshot": snapshot,
+            "participants": participants or [],
+            "receipts": receipts or [],
+        },
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _bill_headers(bill):
+    return {"X-Bill-Token": bill["token"]}
+
+
+def test_bill_create_and_read_with_the_token():
+    """The whole shape: the creator publishes a sealed snapshot and some seeded
+    ghosts; a stranger with only the token reads it back."""
+    creator = signed_up("bill-owner")
+    bill = _make_bill(
+        creator,
+        snapshot="sealed-static-part",
+        participants=[
+            {"participant_id": 101, "name": "sealed-Sam"},
+            {"participant_id": 102, "name": "sealed-Alex"},
+        ],
+    )
+    assert bill["id"] and bill["token"]
+
+    got = _anon().get(f"/api/bills/{bill['id']}", headers=_bill_headers(bill))
+    assert got.status_code == 200
+    body = got.json()
+    assert body["snapshot"] == "sealed-static-part"
+    seeds = {p["participant_id"]: p for p in body["participants"]}
+    assert seeds[101]["name"] == "sealed-Sam"
+    # Seeded ghosts start unclaimed and carry no claims.
+    assert seeds[101]["claimed"] is False
+    assert seeds[101]["claims"] is None
+
+
+def test_creating_a_bill_needs_a_session():
+    # The creator scans in their logged-in view; anonymous creation is refused.
+    assert _anon().post("/api/bills", json={"snapshot": "x"}).status_code == 401
+
+
+def test_a_bill_snapshot_is_required():
+    creator = signed_up("bill-empty")
+    assert creator.post("/api/bills", json={"snapshot": ""}).status_code == 400
+
+
+def test_the_bill_token_gates_every_read():
+    creator = signed_up("bill-gate")
+    bill = _make_bill(creator)
+    bid = bill["id"]
+    # No token, or a wrong one: 404 either way, so the token stays opaque and a
+    # bill id is never confirmed to someone who cannot open it.
+    assert _anon().get(f"/api/bills/{bid}").status_code == 404
+    assert (
+        _anon().get(f"/api/bills/{bid}", headers={"X-Bill-Token": "nope"}).status_code
+        == 404
+    )
+    assert (
+        _anon().get(f"/api/bills/{bid}", headers=_bill_headers(bill)).status_code == 200
+    )
+
+
+def test_a_seeded_ghost_can_be_claimed_once():
+    creator = signed_up("bill-claim")
+    bill = _make_bill(
+        creator, participants=[{"participant_id": 5, "name": "sealed-Sam"}]
+    )
+    bid, h = bill["id"], _bill_headers(bill)
+
+    first = _anon().post(
+        f"/api/bills/{bid}/participants/5/claim", headers=h, json={"secret": "sam-key"}
+    )
+    assert first.status_code == 200
+
+    # First bind wins: a second claimer with a different secret is turned away.
+    second = _anon().post(
+        f"/api/bills/{bid}/participants/5/claim", headers=h, json={"secret": "other"}
+    )
+    assert second.status_code == 409
+
+    # It now reads back as claimed, and still no secret on the wire.
+    body = _anon().get(f"/api/bills/{bid}", headers=h).json()
+    sam = next(p for p in body["participants"] if p["participant_id"] == 5)
+    assert sam["claimed"] is True
+    assert "secret" not in sam
+
+
+def test_claiming_a_ghost_that_is_not_there():
+    creator = signed_up("bill-noghost")
+    bill = _make_bill(creator)
+    bid, h = bill["id"], _bill_headers(bill)
+    assert (
+        _anon()
+        .post(
+            f"/api/bills/{bid}/participants/999/claim", headers=h, json={"secret": "k"}
+        )
+        .status_code
+        == 404
+    )
+
+
+def test_self_join_adds_a_participant():
+    creator = signed_up("bill-selfjoin")
+    bill = _make_bill(creator)
+    bid, h = bill["id"], _bill_headers(bill)
+
+    joined = _anon().post(
+        f"/api/bills/{bid}/participants",
+        headers=h,
+        json={"participant_id": 77, "name": "sealed-Robin", "secret": "robin-key"},
+    )
+    assert joined.status_code == 200
+
+    body = _anon().get(f"/api/bills/{bid}", headers=h).json()
+    robin = next(p for p in body["participants"] if p["participant_id"] == 77)
+    assert robin["name"] == "sealed-Robin"
+    assert robin["claimed"] is True
+
+    # The same id twice is refused, so two browsers cannot collide silently.
+    again = _anon().post(
+        f"/api/bills/{bid}/participants",
+        headers=h,
+        json={"participant_id": 77, "name": "sealed-Other", "secret": "x"},
+    )
+    assert again.status_code == 409
+
+
+def test_only_the_secret_holder_edits_a_participants_claims():
+    creator = signed_up("bill-mine")
+    bill = _make_bill(
+        creator, participants=[{"participant_id": 9, "name": "sealed-Sam"}]
+    )
+    bid, h = bill["id"], _bill_headers(bill)
+    _anon().post(
+        f"/api/bills/{bid}/participants/9/claim", headers=h, json={"secret": "sam-key"}
+    )
+
+    # The holder of the secret can write their claims.
+    mine = _anon().put(
+        f"/api/bills/{bid}/participants/9/claims",
+        headers=h,
+        json={"secret": "sam-key", "claims": "sealed-item-ids"},
+    )
+    assert mine.status_code == 200
+    body = _anon().get(f"/api/bills/{bid}", headers=h).json()
+    sam = next(p for p in body["participants"] if p["participant_id"] == 9)
+    assert sam["claims"] == "sealed-item-ids"
+
+    # Anyone else with the link cannot rewrite them.
+    theirs = _anon().put(
+        f"/api/bills/{bid}/participants/9/claims",
+        headers=h,
+        json={"secret": "wrong", "claims": "sealed-theft"},
+    )
+    assert theirs.status_code == 403
+
+
+def test_an_unclaimed_ghost_has_no_claims_to_write():
+    creator = signed_up("bill-unclaimed")
+    bill = _make_bill(
+        creator, participants=[{"participant_id": 3, "name": "sealed-Sam"}]
+    )
+    bid, h = bill["id"], _bill_headers(bill)
+    # No secret bound yet: there is nothing to prove ownership against.
+    assert (
+        _anon()
+        .put(
+            f"/api/bills/{bid}/participants/3/claims",
+            headers=h,
+            json={"secret": "anything", "claims": "x"},
+        )
+        .status_code
+        == 404
+    )
+
+
+def test_a_bill_receipt_is_fetchable_with_the_token():
+    creator = signed_up("bill-rcpt")
+    ciphertext, rid = sealed(b"a sealed bill receipt")
+    bill = _make_bill(creator, receipts=[{"receipt_id": rid, "ciphertext": ciphertext}])
+    bid, h = bill["id"], _bill_headers(bill)
+
+    got = _anon().get(f"/api/bills/{bid}/receipts/{rid}", headers=h)
+    assert got.status_code == 200
+    assert got.content == base64.b64decode(ciphertext)
+    assert got.headers["content-type"] == "application/octet-stream"
+
+    # Same token gate as the bill itself.
+    assert _anon().get(f"/api/bills/{bid}/receipts/{rid}").status_code == 404
+
+
+def test_a_bill_receipt_id_must_hash_its_content():
+    creator = signed_up("bill-rcpt-hash")
+    ciphertext, _ = sealed(b"bytes")
+    r = creator.post(
+        "/api/bills",
+        json={
+            "snapshot": "s",
+            "receipts": [{"receipt_id": "0" * 64, "ciphertext": ciphertext}],
+        },
+    )
+    assert r.status_code == 400
