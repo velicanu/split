@@ -39,7 +39,21 @@ export function passkeySupported() {
   )
 }
 
-// Evaluate PRF for a set of credentials in one ceremony; returns which
+const NO_PRF = "This device's passkey can't derive a key (no PRF support)"
+
+// Pull the PRF output out of a create() or get() result, or null if it isn't
+// there. Browsers differ on when results arrive: Chrome can return them from
+// create(), others only from a get() — so callers try create first, then fall
+// back. `enabled === false` is a firm "this authenticator has no PRF", which we
+// surface rather than pointlessly retrying.
+function prfResult(credential) {
+  const prf = credential?.getClientExtensionResults?.().prf
+  if (prf?.results?.first) return new Uint8Array(prf.results.first)
+  if (prf && prf.enabled === false) throw new Error(NO_PRF)
+  return null
+}
+
+// Evaluate PRF for a set of credentials in one get() ceremony; returns which
 // credential answered and the secret it produced.
 async function evaluatePRF(allowCredentials) {
   const assertion = await navigator.credentials.get({
@@ -56,11 +70,9 @@ async function evaluatePRF(allowCredentials) {
       extensions: { prf: { eval: { first: PRF_SALT } } },
     },
   })
-  const prf = assertion?.getClientExtensionResults?.().prf?.results?.first
-  if (!prf) {
-    throw new Error("This device's passkey can't derive a key (no PRF support)")
-  }
-  return { credentialId: toB64(new Uint8Array(assertion.rawId)), prf: new Uint8Array(prf) }
+  const prf = prfResult(assertion)
+  if (!prf) throw new Error(NO_PRF)
+  return { credentialId: toB64(new Uint8Array(assertion.rawId)), prf }
 }
 
 /** Create a passkey (enabling PRF), then derive its secret. Returns the pieces a
@@ -88,9 +100,11 @@ export async function createPasskey({ userId, userName }) {
   })
   if (!cred) throw new Error('Passkey setup was cancelled')
   const credentialId = toB64(new Uint8Array(cred.rawId))
-  // PRF results may only come back at get-time, so always derive via a get.
-  const { prf } = await evaluatePRF([credentialId])
-  return { credentialId, prfBytes: prf, label: `passkey · ${new Date().toISOString().slice(0, 10)}` }
+  // Best case, and the common one on Chrome/Android: the secret comes back on
+  // the create itself — no second prompt. Only if it doesn't do we fall back to
+  // a get() to evaluate it (prfResult throws early if PRF is truly unsupported).
+  const prfBytes = prfResult(cred) ?? (await evaluatePRF([credentialId])).prf
+  return { credentialId, prfBytes, label: `passkey · ${new Date().toISOString().slice(0, 10)}` }
 }
 
 /** Re-derive the secret for a set of existing passkey wraps, in one prompt.
