@@ -597,10 +597,12 @@ describe('the recovery code', () => {
   })
 })
 
-// A stand-in authenticator: create() registers a credential with a fixed PRF
-// secret, get() answers PRF for whichever allowed credential it holds. Enough to
-// drive the real webauthn.js ceremony; the real thing needs hardware jsdom lacks.
-function fakeAuthenticator() {
+// A stand-in authenticator. `prf` controls when the PRF secret comes back, so
+// both real code paths are covered: 'create' returns it on the create ceremony
+// (Chrome/Android's common case), 'get' returns it only from a get() (the
+// fallback), and 'none' is an authenticator with no PRF at all. Enough to drive
+// the real webauthn.js ceremony; the real thing needs hardware jsdom lacks.
+function fakeAuthenticator({ prf = 'create' } = {}) {
   const b64 = (bytes) => {
     let s = ''
     for (const byte of bytes) s += String.fromCharCode(byte)
@@ -608,6 +610,11 @@ function fakeAuthenticator() {
   }
   const creds = new Map()
   let n = 0
+  const ext = (kind, secret) => {
+    if (prf === 'none') return { prf: { enabled: false } }
+    if (kind === 'create' && prf !== 'create') return { prf: { enabled: true } }
+    return { prf: { enabled: true, results: { first: secret } } }
+  }
   globalThis.PublicKeyCredential = function () {}
   Object.defineProperty(globalThis.navigator, 'credentials', {
     configurable: true,
@@ -616,7 +623,10 @@ function fakeAuthenticator() {
         const id = new Uint8Array([9, 9, n, (n += 1)])
         const secret = new Uint8Array(32).fill(id[3] || 1)
         creds.set(b64(id), secret)
-        return { rawId: id.buffer, getClientExtensionResults: () => ({}) }
+        return {
+          rawId: id.buffer,
+          getClientExtensionResults: () => ext('create', secret),
+        }
       },
       async get({ publicKey }) {
         for (const c of publicKey.allowCredentials) {
@@ -624,9 +634,7 @@ function fakeAuthenticator() {
           if (creds.has(key)) {
             return {
               rawId: new Uint8Array(c.id).buffer,
-              getClientExtensionResults: () => ({
-                prf: { results: { first: creds.get(key) } },
-              }),
+              getClientExtensionResults: () => ext('get', creds.get(key)),
             }
           }
         }
@@ -658,6 +666,38 @@ describe('passkeys', () => {
       const back = await enrolWithPasskey({ login_handle: 'v' })
       assert.equal(back.login_handle, 'v')
       assert.ok(await loadDeviceKey(), 'and it minted a device key')
+    } finally {
+      restore()
+    }
+  })
+
+  test('works when PRF only comes back from a get(), not create()', async () => {
+    // Some browsers don't return the PRF result on the create ceremony; the
+    // client must fall back to a get() to evaluate it. (This was the bug behind
+    // "no PRF support" on Android — we only ever read the get before.)
+    fakeServer()
+    const restore = fakeAuthenticator({ prf: 'get' })
+    try {
+      const me = await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      await addPasskey(account, { userId: me.id, userName: 'v' })
+      await forgetDeviceKey()
+      assert.equal((await enrolWithPasskey({ login_handle: 'v' })).login_handle, 'v')
+    } finally {
+      restore()
+    }
+  })
+
+  test('an authenticator with no PRF says so, plainly', async () => {
+    fakeServer()
+    const restore = fakeAuthenticator({ prf: 'none' })
+    try {
+      await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      await assert.rejects(
+        () => addPasskey(account, { userId: 1, userName: 'v' }),
+        /no PRF support/
+      )
     } finally {
       restore()
     }
