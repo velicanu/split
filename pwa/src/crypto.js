@@ -133,29 +133,108 @@ async function kdf(password, saltB64) {
   )
 }
 
+// --- account-key wraps -------------------------------------------------
+//
+// One account key, sealed under several unlock secrets — a password, a recovery
+// code, one per passkey. Every wrap is the same secretbox over the account key;
+// only how the 32-byte key is derived differs (Argon2 over a password, a hash of
+// a high-entropy recovery code, a passkey's PRF output). Any one wrap can
+// bootstrap a fresh device. See plan/16.
+
+async function sealAccount(accountKey, keyBytes) {
+  await ready
+  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES)
+  const sealed = sodium.crypto_secretbox_easy(
+    sodium.from_string(JSON.stringify(accountKey)),
+    nonce,
+    keyBytes
+  )
+  return JSON.stringify({ nonce: b64(nonce), body: b64(sealed) })
+}
+
+async function openAccount(ciphertext, keyBytes, wrongMessage) {
+  await ready
+  const { nonce, body } = JSON.parse(ciphertext)
+  let plain
+  try {
+    plain = sodium.crypto_secretbox_open_easy(unb64(body), unb64(nonce), keyBytes)
+  } catch {
+    throw new Error(wrongMessage)
+  }
+  if (!plain) throw new Error(wrongMessage)
+  return JSON.parse(sodium.to_string(plain))
+}
+
+// A high-entropy secret (recovery entropy, PRF output) folded to a 32-byte
+// secretbox key. No slow KDF: the input is already high-entropy, so Argon2id —
+// which exists only to shore up a guessable password — would buy nothing.
+const strongKey = async (bytes) => {
+  await ready
+  return sodium.crypto_generichash(sodium.crypto_secretbox_KEYBYTES, bytes)
+}
+
 /** Wrap the account key under a password. Returns what the server stores —
  *  all of it opaque to the server, which never sees the password. */
 export async function wrapAccountKey(accountKey, password) {
   await ready
   const salt = sodium.randombytes_buf(sodium.crypto_pwhash_SALTBYTES)
   const params = JSON.stringify({
+    kdf: 'argon2id',
     salt: b64(salt),
     ops: KDF_OPS(),
     mem: KDF_MEM(),
     alg: sodium.crypto_pwhash_ALG_ARGON2ID13,
   })
   const key = await kdf(password, b64(salt))
-  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES)
-  const sealed = sodium.crypto_secretbox_easy(
-    sodium.from_string(JSON.stringify(accountKey)),
-    nonce,
-    key
-  )
   return {
+    id: 'password',
     method: 'password',
     params,
-    ciphertext: JSON.stringify({ nonce: b64(nonce), body: b64(sealed) }),
+    ciphertext: await sealAccount(accountKey, key),
   }
+}
+
+/** Wrap the account key under a recovery code's entropy. High-entropy, so it is
+ *  the wrap that closes the offline-crack risk a password wrap leaves open. */
+export async function wrapAccountKeyRecovery(accountKey, entropyBytes) {
+  return {
+    id: 'recovery',
+    method: 'recovery',
+    params: '{}',
+    ciphertext: await sealAccount(accountKey, await strongKey(entropyBytes)),
+  }
+}
+
+export async function unwrapAccountKeyRecovery(wrap, entropyBytes) {
+  return openAccount(
+    wrap.ciphertext,
+    await strongKey(entropyBytes),
+    'Wrong recovery code'
+  )
+}
+
+/** Wrap the account key under a passkey's PRF output. The credential id and PRF
+ *  salt live in params so a fresh device can re-run the ceremony; the PRF output
+ *  itself never leaves the client and never reaches the server. */
+export async function wrapAccountKeyPasskey(accountKey, prfBytes, meta) {
+  return {
+    id: meta.id,
+    method: 'passkey',
+    params: JSON.stringify({
+      label: meta.label || 'passkey',
+      credential_id: meta.credentialId,
+      prf_salt: meta.prfSalt,
+    }),
+    ciphertext: await sealAccount(accountKey, await strongKey(prfBytes)),
+  }
+}
+
+export async function unwrapAccountKeyPasskey(wrap, prfBytes) {
+  return openAccount(
+    wrap.ciphertext,
+    await strongKey(prfBytes),
+    'That passkey did not unlock the account'
+  )
 }
 
 // --- group keys --------------------------------------------------------
@@ -286,7 +365,6 @@ export async function decryptBytes(groupKeyB64, blob) {
 export async function unwrapAccountKey(wrap, password) {
   await ready
   const params = JSON.parse(wrap.params)
-  const { nonce, body } = JSON.parse(wrap.ciphertext)
   const key = sodium.crypto_pwhash(
     sodium.crypto_secretbox_KEYBYTES,
     password,
@@ -295,12 +373,5 @@ export async function unwrapAccountKey(wrap, password) {
     params.mem,
     params.alg
   )
-  let plain
-  try {
-    plain = sodium.crypto_secretbox_open_easy(unb64(body), unb64(nonce), key)
-  } catch {
-    throw new Error('Wrong password')
-  }
-  if (!plain) throw new Error('Wrong password')
-  return JSON.parse(sodium.to_string(plain))
+  return openAccount(wrap.ciphertext, key, 'Wrong password')
 }

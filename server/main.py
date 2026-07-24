@@ -27,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def reset_if_stale(conn):
@@ -75,14 +75,22 @@ def init_db():
             # which is Ed25519 and only ever signs.
             " account_box_pubkey TEXT NOT NULL)"
         )
-        # The account private key, encrypted client-side. Opaque here.
+        # The account private key, encrypted client-side under some unlock
+        # secret. Opaque here. There can be several: a password, a recovery code,
+        # and one per passkey — each an independent wrap of the *same* account
+        # key, so any one of them can bootstrap a fresh device. Keyed by a
+        # client-chosen id ('password', 'recovery', or a passkey's own id) so a
+        # password change replaces just its row and a passkey adds one, rather
+        # than every method sharing a single slot. `method` is for display and
+        # for a new device to know how to satisfy the wrap. See plan/16.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS key_wraps ("
             " user_id INTEGER NOT NULL REFERENCES users(id),"
+            " id TEXT NOT NULL,"
             " method TEXT NOT NULL,"
             " params TEXT NOT NULL,"
             " ciphertext TEXT NOT NULL,"
-            " PRIMARY KEY (user_id, method))"
+            " PRIMARY KEY (user_id, id))"
         )
         # One row per device. Revoking — and logging out, which is the same
         # act — deletes the row: the device can no longer authenticate, and
@@ -283,6 +291,9 @@ def verify_sig(pubkey_b64: str, message: bytes, sig_b64: str) -> bool:
 
 
 class WrapIn(BaseModel):
+    # A client-chosen id ('password', 'recovery', or a passkey's own id); the
+    # method tells a fresh device how to satisfy it.
+    id: str
     method: str
     params: str
     ciphertext: str
@@ -319,10 +330,6 @@ class DeviceIn(BaseModel):
     signed_by: str  # 'device' | 'account'
     signer_pubkey: str
     signature: str
-
-
-class WrapsReplace(BaseModel):
-    wraps: list[WrapIn]
 
 
 class GroupCreate(BaseModel):
@@ -513,9 +520,9 @@ def signup(body: SignupIn, response: Response):
             )
             for w in body.wraps:
                 conn.execute(
-                    "INSERT INTO key_wraps (user_id, method, params, ciphertext)"
-                    " VALUES (?, ?, ?, ?)",
-                    (user_id, w.method, w.params, w.ciphertext),
+                    "INSERT INTO key_wraps (user_id, id, method, params, ciphertext)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (user_id, w.id, w.method, w.params, w.ciphertext),
                 )
     except sqlite3.IntegrityError:
         raise HTTPException(409, "login handle already taken") from None
@@ -540,7 +547,7 @@ def get_wraps(login_handle: str):
             # an oracle for which handles exist.
             return {"account_pubkey": None, "wraps": []}
         rows = conn.execute(
-            "SELECT method, params, ciphertext FROM key_wraps WHERE user_id = ?",
+            "SELECT id, method, params, ciphertext FROM key_wraps WHERE user_id = ?",
             (user["id"],),
         ).fetchall()
     return {
@@ -665,23 +672,46 @@ def me(request: Request):
     }
 
 
-@app.put("/api/wraps")
-def replace_wraps(body: WrapsReplace, request: Request):
-    """Changing your password is re-wrapping the account key on the client and
-    replacing the blob. The server verifies nothing about it — it cannot: it
-    has never seen the old password and will never see the new one, and it
-    holds no plaintext to check the result against."""
+@app.post("/api/wraps")
+def put_wrap(body: WrapIn, request: Request):
+    """Add or replace one wrap of the account key — a new passkey, a rotated
+    recovery code, a changed password (same id, new blob). The server verifies
+    nothing about it: it has never seen the unlock secret and holds no plaintext
+    to check against. A client that stores garbage only locks itself out of that
+    one method.
+
+    Adding a wrap requires an existing session — you are on a device that has
+    already unlocked the account to produce this blob. See plan/16."""
     user = require_user(request)
-    if not body.wraps:
-        raise HTTPException(400, "at least one wrap required")
     with db() as conn:
-        conn.execute("DELETE FROM key_wraps WHERE user_id = ?", (user["id"],))
-        for w in body.wraps:
-            conn.execute(
-                "INSERT INTO key_wraps (user_id, method, params, ciphertext)"
-                " VALUES (?, ?, ?, ?)",
-                (user["id"], w.method, w.params, w.ciphertext),
-            )
+        conn.execute(
+            "INSERT OR REPLACE INTO key_wraps (user_id, id, method, params, ciphertext)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (user["id"], body.id, body.method, body.params, body.ciphertext),
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/wraps/{wrap_id}")
+def delete_wrap(wrap_id: str, request: Request):
+    """Drop one unlock method — e.g. remove the password once a passkey and a
+    recovery code exist, so a weak password can't undermine the strong ones.
+
+    The last wrap can never be deleted: with none, a lost device would be an
+    unrecoverable account, and the server holds nothing it could reset."""
+    user = require_user(request)
+    with db() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM key_wraps WHERE user_id = ?", (user["id"],)
+        ).fetchone()[0]
+        if total <= 1:
+            raise HTTPException(400, "cannot remove your only way back in")
+        cur = conn.execute(
+            "DELETE FROM key_wraps WHERE user_id = ? AND id = ?",
+            (user["id"], wrap_id),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, "no such wrap")
     return {"ok": True}
 
 

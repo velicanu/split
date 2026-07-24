@@ -47,7 +47,14 @@ def enrolled(handle, display=None):
             "device_pubkey": dev_pub,
             "box_pubkey": b64(b"box-" + handle.encode()),
             "label": "first device",
-            "wraps": [{"method": "password", "params": "{}", "ciphertext": "sealed"}],
+            "wraps": [
+                {
+                    "id": "password",
+                    "method": "password",
+                    "params": "{}",
+                    "ciphertext": "sealed",
+                }
+            ],
         },
     )
     assert r.status_code == 200, r.text
@@ -410,18 +417,46 @@ def test_you_cannot_revoke_someone_elses_device():
     assert sign_in(client(), v_priv, v_pub).status_code == 200
 
 
-def test_replacing_wraps_requires_a_session():
+def _wrap(id, method="password", ciphertext="sealed"):
+    return {"id": id, "method": method, "params": "{}", "ciphertext": ciphertext}
+
+
+def test_a_wrap_can_be_added_and_replaced_by_id():
     c, _, _ = enrolled("rewrapper")
-    body = {"wraps": [{"method": "password", "params": "{}", "ciphertext": "new"}]}
-    assert c.put("/api/wraps", json=body).status_code == 200
+    # Same id replaces (a password change); a new id adds (a passkey, a code).
     assert (
-        client()
-        .get("/api/wraps?login_handle=rewrapper")
-        .json()["wraps"][0]["ciphertext"]
-        == "new"
+        c.post("/api/wraps", json=_wrap("password", ciphertext="new")).status_code
+        == 200
     )
-    assert c.put("/api/wraps", json={"wraps": []}).status_code == 400
-    assert client().put("/api/wraps", json=body).status_code == 401
+    assert c.post("/api/wraps", json=_wrap("recovery", "recovery")).status_code == 200
+
+    wraps = {
+        w["id"]: w
+        for w in client().get("/api/wraps?login_handle=rewrapper").json()["wraps"]
+    }
+    assert wraps["password"]["ciphertext"] == "new"
+    assert wraps["recovery"]["method"] == "recovery"
+
+
+def test_adding_a_wrap_needs_a_session():
+    enrolled("wrap-auth")
+    assert client().post("/api/wraps", json=_wrap("password")).status_code == 401
+
+
+def test_the_last_wrap_cannot_be_removed():
+    c, _, _ = enrolled("floor")
+    # Signup left one wrap. A second can be added, then either removed…
+    c.post("/api/wraps", json=_wrap("recovery", "recovery"))
+    assert c.delete("/api/wraps/recovery").status_code == 200
+    # …but the final remaining one cannot — that would be an unrecoverable account.
+    assert c.delete("/api/wraps/password").status_code == 400
+    assert len(client().get("/api/wraps?login_handle=floor").json()["wraps"]) == 1
+
+
+def test_removing_a_wrap_needs_a_session():
+    c, _, _ = enrolled("wrap-del")
+    c.post("/api/wraps", json=_wrap("recovery", "recovery"))
+    assert client().delete("/api/wraps/recovery").status_code == 401
 
 
 def test_a_stale_database_is_wiped_rather_than_half_migrated():
