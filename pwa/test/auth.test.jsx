@@ -7,7 +7,17 @@ import { afterEach, describe, test } from 'node:test'
 
 import sodium from 'libsodium-wrappers-sumo'
 
-import { changePassword, enrol, logout, resume, signup } from '../src/auth.js'
+import {
+  addPasskey,
+  changePassword,
+  enrol,
+  enrolWithPasskey,
+  enrolWithRecovery,
+  logout,
+  resume,
+  signup,
+  unlockAccount,
+} from '../src/auth.js'
 import {
   forgetLocalLedger,
   localEvents,
@@ -22,8 +32,10 @@ import {
   loadSession,
   saveDeviceKey,
   unwrapAccountKey,
+  unwrapAccountKeyRecovery,
   wrapAccountKey,
 } from '../src/crypto.js'
+import { decodeRecoveryCode } from '../src/recovery.js'
 
 // A server that stores what it is given and verifies signatures for real.
 function fakeServer() {
@@ -73,8 +85,20 @@ function fakeServer() {
       const handle = decodeURIComponent(path.split('=')[1])
       return json({ wraps: state.wraps[handle] ?? [] })
     }
-    if (path === 'wraps' && options.method === 'PUT') {
-      state.wraps[state.session] = body.wraps
+    if (path === 'wraps' && options.method === 'POST') {
+      // Upsert one wrap by id: same id replaces (a password change), a new id
+      // adds (a passkey, a recovery code). The real server does the same.
+      const list = state.wraps[state.session] ?? (state.wraps[state.session] = [])
+      const i = list.findIndex((w) => w.id === body.id)
+      if (i >= 0) list[i] = body
+      else list.push(body)
+      return json({ ok: true })
+    }
+    if (path.startsWith('wraps/') && options.method === 'DELETE') {
+      const id = decodeURIComponent(path.split('/')[1])
+      const list = state.wraps[state.session] ?? []
+      if (list.length <= 1) return fail(400, 'cannot remove your only way back in')
+      state.wraps[state.session] = list.filter((w) => w.id !== id)
       return json({ ok: true })
     }
     if (path === 'auth/challenge') {
@@ -511,6 +535,165 @@ describe('changing the password', () => {
 
     await assert.rejects(() => enrol({ login_handle: 'v', password: 'old' }))
     assert.equal((await enrol({ login_handle: 'v', password: 'new' })).login_handle, 'v')
+  })
+})
+
+describe('the recovery code', () => {
+  test('signup mints one, and it unwraps the same account key', async () => {
+    const server = fakeServer()
+    const me = await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    assert.ok(me.recoveryCode, 'the code is handed back to show once')
+
+    const wraps = server.wraps.v
+    const recovery = wraps.find((w) => w.method === 'recovery')
+    assert.ok(recovery, 'and a recovery wrap is stored alongside the password')
+    // The code that came back really opens that wrap.
+    const account = await unwrapAccountKeyRecovery(
+      recovery,
+      decodeRecoveryCode(me.recoveryCode)
+    )
+    assert.equal(account.pubkey, server.users.v.account_pubkey)
+  })
+
+  test('a fresh device can enrol with the code and no password', async () => {
+    fakeServer()
+    const { recoveryCode } = await signup({
+      login_handle: 'v',
+      display_name: 'V',
+      password: 'pw',
+    })
+    await forgetDeviceKey()
+
+    const me = await enrolWithRecovery({ login_handle: 'v', code: recoveryCode })
+    assert.equal(me.login_handle, 'v')
+    assert.ok(await loadDeviceKey(), 'and it minted a device key')
+  })
+
+  test('a wrong code is refused', async () => {
+    fakeServer()
+    await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+    await forgetDeviceKey()
+    await assert.rejects(
+      () => enrolWithRecovery({ login_handle: 'v', code: 'AAAAA-AAAAA-AAAAA-AAAAA-AAAAA-AA' }),
+      /recovery code|decrypt/i
+    )
+  })
+
+  test('changing the password leaves the recovery code working', async () => {
+    // The per-wrap upsert must touch only the password row — a password change
+    // that silently invalidated the recovery code would be a nasty trap.
+    fakeServer()
+    const { recoveryCode } = await signup({
+      login_handle: 'v',
+      display_name: 'V',
+      password: 'old',
+    })
+    await changePassword({ login_handle: 'v', current: 'old', next: 'new' })
+    await forgetDeviceKey()
+    assert.equal(
+      (await enrolWithRecovery({ login_handle: 'v', code: recoveryCode })).login_handle,
+      'v'
+    )
+  })
+})
+
+// A stand-in authenticator: create() registers a credential with a fixed PRF
+// secret, get() answers PRF for whichever allowed credential it holds. Enough to
+// drive the real webauthn.js ceremony; the real thing needs hardware jsdom lacks.
+function fakeAuthenticator() {
+  const b64 = (bytes) => {
+    let s = ''
+    for (const byte of bytes) s += String.fromCharCode(byte)
+    return btoa(s)
+  }
+  const creds = new Map()
+  let n = 0
+  globalThis.PublicKeyCredential = function () {}
+  Object.defineProperty(globalThis.navigator, 'credentials', {
+    configurable: true,
+    value: {
+      async create() {
+        const id = new Uint8Array([9, 9, n, (n += 1)])
+        const secret = new Uint8Array(32).fill(id[3] || 1)
+        creds.set(b64(id), secret)
+        return { rawId: id.buffer, getClientExtensionResults: () => ({}) }
+      },
+      async get({ publicKey }) {
+        for (const c of publicKey.allowCredentials) {
+          const key = b64(new Uint8Array(c.id))
+          if (creds.has(key)) {
+            return {
+              rawId: new Uint8Array(c.id).buffer,
+              getClientExtensionResults: () => ({
+                prf: { results: { first: creds.get(key) } },
+              }),
+            }
+          }
+        }
+        throw new Error('no such credential')
+      },
+    },
+  })
+  return () => {
+    delete globalThis.PublicKeyCredential
+    Object.defineProperty(globalThis.navigator, 'credentials', {
+      configurable: true,
+      value: undefined,
+    })
+  }
+}
+
+describe('passkeys', () => {
+  test('add a passkey, then unlock a fresh device with it — no password', async () => {
+    fakeServer()
+    const restore = fakeAuthenticator()
+    try {
+      const me = await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      // Adding a passkey unlocks the account with the password, then wraps it.
+      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      await addPasskey(account, { userId: me.id, userName: 'v' })
+
+      // A fresh device signs in with only the passkey.
+      await forgetDeviceKey()
+      const back = await enrolWithPasskey({ login_handle: 'v' })
+      assert.equal(back.login_handle, 'v')
+      assert.ok(await loadDeviceKey(), 'and it minted a device key')
+    } finally {
+      restore()
+    }
+  })
+
+  test('the passkey wrap never carries the PRF secret to the server', async () => {
+    const server = fakeServer()
+    const restore = fakeAuthenticator()
+    try {
+      await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      await addPasskey(account, { userId: 1, userName: 'v' })
+      const wrap = server.wraps.v.find((w) => w.method === 'passkey')
+      assert.ok(wrap, 'a passkey wrap is stored')
+      // Only the credential id and a label — no secret, no account key.
+      const params = JSON.parse(wrap.params)
+      assert.ok(params.credential_id && params.label)
+      assert.ok(!('prf' in params) && !('secret' in params))
+    } finally {
+      restore()
+    }
+  })
+
+  test('enrolling with a passkey the account does not have is refused', async () => {
+    fakeServer()
+    const restore = fakeAuthenticator()
+    try {
+      await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      await forgetDeviceKey()
+      await assert.rejects(
+        () => enrolWithPasskey({ login_handle: 'v' }),
+        /No passkey/
+      )
+    } finally {
+      restore()
+    }
   })
 })
 

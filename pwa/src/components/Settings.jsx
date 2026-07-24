@@ -6,7 +6,15 @@ import { useCallback, useEffect, useState } from 'react'
 import { PROVIDERS } from '../ai'
 import { api } from '../api'
 import { saveApiKey } from '../aikeys'
-import { changePassword } from '../auth'
+import {
+  addPasskey,
+  addRecoveryWrap,
+  changePassword,
+  listWraps,
+  removeWrap,
+  unlockAccount,
+} from '../auth'
+import { passkeySupported } from '../webauthn'
 import { loadTheme, setTheme } from '../theme'
 
 // Light, dark, or follow the system — a device preference (theme.js). The
@@ -161,9 +169,144 @@ export function Settings({ ai, user, onChanged, onClose }) {
       {error && <p className="error">{error}</p>}
 
       <h2>Account</h2>
+      <SignInMethods user={user} />
       <PasswordForm user={user} />
       <Devices />
     </section>
+  )
+}
+
+// The ways back into this account: the password, a recovery code, and any
+// passkeys. Adding one needs the account key, which this device never holds, so
+// each add unlocks it fresh with the password. Removing the weak password once
+// a passkey and code exist is allowed — the server keeps at least one. See
+// plan/16.
+const WRAP_LABEL = {
+  password: 'Password',
+  recovery: 'Recovery code',
+}
+const labelFor = (w) =>
+  WRAP_LABEL[w.method] ?? (JSON.parse(w.params || '{}').label || 'Passkey')
+
+function SignInMethods({ user }) {
+  const [wraps, setWraps] = useState(null)
+  // Which add is in flight ('recovery' | 'passkey'), gated behind the password.
+  const [adding, setAdding] = useState(null)
+  const [password, setPassword] = useState('')
+  const [newCode, setNewCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const load = useCallback(() => {
+    listWraps(user.login_handle)
+      .then(setWraps)
+      .catch(() => setWraps([]))
+  }, [user.login_handle])
+  useEffect(load, [load])
+
+  function start(kind) {
+    setError('')
+    setNewCode('')
+    setPassword('')
+    setAdding(kind)
+  }
+
+  async function confirmAdd(e) {
+    e.preventDefault()
+    setError('')
+    setBusy(true)
+    try {
+      const account = await unlockAccount({
+        login_handle: user.login_handle,
+        password,
+      })
+      if (adding === 'recovery') {
+        setNewCode(await addRecoveryWrap(account))
+      } else {
+        await addPasskey(account, { userId: user.id, userName: user.login_handle })
+      }
+      setPassword('')
+      setAdding(null)
+      load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(id) {
+    setError('')
+    try {
+      await removeWrap(id)
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  if (wraps === null) return null
+  const hasRecovery = wraps.some((w) => w.method === 'recovery')
+
+  return (
+    <div>
+      <h3>Sign-in methods</h3>
+      <ul className="list">
+        {wraps.map((w) => (
+          <li key={w.id} className="row static">
+            <span>{labelFor(w)}</span>
+            {wraps.length > 1 && (
+              <button className="link danger" onClick={() => remove(w.id)}>
+                remove
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      {newCode && (
+        <p className="muted">
+          Your new recovery code — save it now, it won&rsquo;t be shown again:
+          <br />
+          <strong>{newCode}</strong>
+        </p>
+      )}
+
+      {adding ? (
+        <form onSubmit={confirmAdd}>
+          <p className="muted">
+            Enter your password to {adding === 'passkey' ? 'add a passkey' : 'make a recovery code'}.
+          </p>
+          <input
+            type="password"
+            placeholder="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+          <div className="row-actions">
+            <button type="submit" disabled={busy}>
+              {busy ? 'working…' : 'Confirm'}
+            </button>
+            <button type="button" className="link" onClick={() => setAdding(null)}>
+              cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <div className="row-actions">
+          {passkeySupported() && (
+            <button className="link" onClick={() => start('passkey')}>
+              Add a passkey
+            </button>
+          )}
+          <button className="link" onClick={() => start('recovery')}>
+            {hasRecovery ? 'Replace recovery code' : 'Create recovery code'}
+          </button>
+        </div>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
   )
 }
 

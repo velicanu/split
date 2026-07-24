@@ -17,7 +17,8 @@
 import assert from 'node:assert/strict'
 import { after, describe, test } from 'node:test'
 
-import { signup } from '../src/auth.js'
+import { enrolWithRecovery, signup } from '../src/auth.js'
+import { forgetDeviceKey } from '../src/crypto.js'
 import { api } from '../src/api.js'
 import { encryptPayload } from '../src/crypto.js'
 import { createGroupKey, groupKey } from '../src/groupkeys.js'
@@ -208,6 +209,33 @@ describe('against a real server', { skip }, () => {
 
     // Without the token, the session-less reader gets nothing.
     await assert.rejects(() => api(`groups/${group.id}/events?since=0`))
+  })
+
+  test('a recovery code enrols a fresh device against the real server', async () => {
+    // signup posts two wraps — password and recovery — and the server has to
+    // accept the multi-wrap shape and hand both back by handle. Only a real
+    // server can confirm the new wrap endpoints line up with the client.
+    const h = handle('recovery')
+    const { recoveryCode } = await signup({
+      login_handle: h,
+      display_name: 'Rec',
+      password: 'live-test-password',
+    })
+    assert.ok(recoveryCode, 'a code was minted at signup')
+
+    // A fresh device: no session, no local key. The code alone must get back in.
+    jar = ''
+    await forgetDeviceKey()
+    const me = await enrolWithRecovery({ login_handle: h, code: recoveryCode })
+    assert.equal(me.login_handle, h, 'enrolled with the recovery code, no password')
+
+    // A wrong code is refused.
+    jar = ''
+    await forgetDeviceKey()
+    await assert.rejects(
+      () => enrolWithRecovery({ login_handle: h, code: '00000-00000-00000-00000-00000-00' }),
+      /recovery code|decrypt/i
+    )
   })
 
   test('a shared bill: sealed create, account-less claim, folded split', async () => {
