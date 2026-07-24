@@ -42,16 +42,26 @@ export function passkeySupported() {
 }
 
 const CANT_DERIVE = "This device's passkey can't derive a key"
+// PRF is an optional extension; not every passkey provider implements the
+// hmac-secret it rides on. KeePassDX, for one, doesn't — the credential is
+// created fine but yields no PRF, so it can't unlock the account. The fix is a
+// provider that does support it, or the password / recovery code.
+const USE_INSTEAD =
+  'Use a provider that supports PRF (Google Password Manager, iCloud Keychain, or a security key), or sign in with your password or recovery code.'
 
-// Distinguish the three failure shapes so a report from a real device pins down
-// the cause instead of just saying "no PRF":
-//   - no prf output at all  -> the provider didn't process the extension
+// Distinguish the failure shapes so a report from a real device pins down the
+// cause:
+//   - no prf output at all  -> the provider ignored the extension (e.g. KeePassDX)
 //   - enabled === false     -> the passkey has no PRF (no hmac-secret)
 //   - enabled, no results   -> PRF ran but returned nothing (a request problem)
 function prfDiagnostic(prf) {
-  if (!prf) return `${CANT_DERIVE} — this passkey provider didn't offer PRF`
-  if (prf.enabled === false) return `${CANT_DERIVE} — this passkey has no PRF (hmac-secret)`
-  return `${CANT_DERIVE} — PRF was enabled but returned no value`
+  if (!prf) {
+    return `${CANT_DERIVE}: your passkey provider doesn't support PRF. ${USE_INSTEAD}`
+  }
+  if (prf.enabled === false) {
+    return `${CANT_DERIVE}: this passkey has no PRF (hmac-secret). ${USE_INSTEAD}`
+  }
+  return `${CANT_DERIVE}: PRF was enabled but returned no value. ${USE_INSTEAD}`
 }
 
 // The PRF output from a create() or get() result, or null if absent. Browsers
@@ -64,6 +74,7 @@ function prfBytesOf(credential) {
 }
 
 const prfValues = () => ({ first: PRF_SALT })
+const passkeyLabel = () => `passkey · ${new Date().toISOString().slice(0, 10)}`
 
 // Evaluate PRF for a set of credentials in one get() ceremony; returns which
 // credential answered and the secret it produced. Requests PRF both ways —
@@ -123,15 +134,21 @@ export async function createPasskey({ userId, userName }) {
   })
   if (!cred) throw new Error('Passkey setup was cancelled')
   const credentialId = toB64(new Uint8Array(cred.rawId))
-  // Best case, and the common one on Chrome/Android: the secret comes back on
-  // the create itself — no second prompt. A firm enabled:false means no PRF at
-  // all, so don't bother with a get. Otherwise fall back to a get() to derive.
   const created = prfBytesOf(cred)
-  if (created.prf && created.prf.enabled === false) {
+  // Best case, and the common one on Chrome/Android: the secret is on the create
+  // itself — no second prompt.
+  if (created.bytes) {
+    return { credentialId, prfBytes: created.bytes, label: passkeyLabel() }
+  }
+  // No secret, and either no PRF object at all (the provider ignored the
+  // extension) or a firm enabled:false — a get() cannot conjure PRF a provider
+  // doesn't have, so fail now rather than firing a second, pointless prompt.
+  if (!created.prf || created.prf.enabled === false) {
     throw new Error(prfDiagnostic(created.prf))
   }
-  const prfBytes = created.bytes ?? (await evaluatePRF([credentialId])).prf
-  return { credentialId, prfBytes, label: `passkey · ${new Date().toISOString().slice(0, 10)}` }
+  // PRF is enabled but the value only comes at get-time (some browsers): derive.
+  const prfBytes = (await evaluatePRF([credentialId])).prf
+  return { credentialId, prfBytes, label: passkeyLabel() }
 }
 
 /** Re-derive the secret for a set of existing passkey wraps, in one prompt.

@@ -611,6 +611,9 @@ function fakeAuthenticator({ prf = 'create' } = {}) {
   const creds = new Map()
   let n = 0
   const ext = (kind, secret) => {
+    // 'absent' models a provider that ignores the PRF extension (e.g. KeePassDX):
+    // the credential is made, but there is no prf output at all.
+    if (prf === 'absent') return {}
     if (prf === 'none') return { prf: { enabled: false } }
     if (kind === 'create' && prf !== 'create') return { prf: { enabled: true } }
     return { prf: { enabled: true, results: { first: secret } } }
@@ -708,6 +711,25 @@ describe('passkeys', () => {
         () => addPasskey(account, { userId: 1, userName: 'v' }),
         /no PRF/
       )
+    } finally {
+      restore()
+    }
+  })
+
+  test('a provider that ignores PRF fails fast, without a second prompt', async () => {
+    // The KeePassDX case: create() succeeds but returns no PRF at all. A get()
+    // can't conjure one, so we must not fire a second (confusing) prompt — we
+    // fail immediately with an actionable message.
+    fakeServer()
+    const restore = fakeAuthenticator({ prf: 'absent' })
+    try {
+      await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      await assert.rejects(
+        () => addPasskey(account, { userId: 1, userName: 'v' }),
+        /provider doesn't support PRF/
+      )
+      assert.equal(globalThis.__lastPrfGet, undefined, 'no get() was attempted')
     } finally {
       restore()
     }
