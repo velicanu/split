@@ -9,14 +9,18 @@ import sodium from 'libsodium-wrappers-sumo'
 
 import {
   addPasskey,
+  addRecoveryWrap,
   changePassword,
   enrol,
   enrolWithPasskey,
   enrolWithRecovery,
+  listWraps,
   logout,
+  removeWrap,
   resume,
   signup,
-  unlockAccount,
+  unlockWithPasskey,
+  unlockWithPassword,
 } from '../src/auth.js'
 import {
   forgetLocalLedger,
@@ -664,7 +668,7 @@ describe('passkeys', () => {
     try {
       const me = await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
       // Adding a passkey unlocks the account with the password, then wraps it.
-      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      const account = await unlockWithPassword({ login_handle: 'v', password: 'pw' })
       await addPasskey(account, { userId: me.id, userName: 'v' })
 
       // A fresh device signs in with only the passkey.
@@ -685,7 +689,7 @@ describe('passkeys', () => {
     const restore = fakeAuthenticator({ prf: 'get' })
     try {
       const me = await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
-      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      const account = await unlockWithPassword({ login_handle: 'v', password: 'pw' })
       await addPasskey(account, { userId: me.id, userName: 'v' })
       await forgetDeviceKey()
       assert.equal((await enrolWithPasskey({ login_handle: 'v' })).login_handle, 'v')
@@ -706,7 +710,7 @@ describe('passkeys', () => {
     const restore = fakeAuthenticator({ prf: 'none' })
     try {
       await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
-      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      const account = await unlockWithPassword({ login_handle: 'v', password: 'pw' })
       await assert.rejects(
         () => addPasskey(account, { userId: 1, userName: 'v' }),
         /no PRF/
@@ -724,7 +728,7 @@ describe('passkeys', () => {
     const restore = fakeAuthenticator({ prf: 'absent' })
     try {
       await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
-      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      const account = await unlockWithPassword({ login_handle: 'v', password: 'pw' })
       await assert.rejects(
         () => addPasskey(account, { userId: 1, userName: 'v' }),
         /provider doesn't support PRF/
@@ -740,7 +744,7 @@ describe('passkeys', () => {
     const restore = fakeAuthenticator()
     try {
       await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
-      const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
+      const account = await unlockWithPassword({ login_handle: 'v', password: 'pw' })
       await addPasskey(account, { userId: 1, userName: 'v' })
       const wrap = server.wraps.v.find((w) => w.method === 'passkey')
       assert.ok(wrap, 'a passkey wrap is stored')
@@ -761,8 +765,35 @@ describe('passkeys', () => {
       await forgetDeviceKey()
       await assert.rejects(
         () => enrolWithPasskey({ login_handle: 'v' }),
-        /No passkey/
+        /No passkey|no passkey/
       )
+    } finally {
+      restore()
+    }
+  })
+
+  test('after removing the password, another method can still be added', async () => {
+    // The catch-22: adding a method used to require the password, so removing it
+    // stranded you — no way to add another passkey. Now any method unlocks.
+    const server = fakeServer()
+    const restore = fakeAuthenticator()
+    try {
+      const me = await signup({ login_handle: 'v', display_name: 'V', password: 'pw' })
+      let account = await unlockWithPassword({ login_handle: 'v', password: 'pw' })
+      await addPasskey(account, { userId: me.id, userName: 'v' })
+
+      await removeWrap('password')
+      assert.ok(
+        !server.wraps.v.some((w) => w.method === 'password'),
+        'the password wrap is gone'
+      )
+
+      // Unlock with the passkey — no password anywhere — and add a second one.
+      account = await unlockWithPasskey({ login_handle: 'v' })
+      await addPasskey(account, { userId: me.id, userName: 'v' })
+
+      const passkeys = (await listWraps('v')).filter((w) => w.method === 'passkey')
+      assert.equal(passkeys.length, 2, 'a second passkey was added with no password')
     } finally {
       restore()
     }
