@@ -28,6 +28,8 @@ const toB64 = (bytes) => {
   return btoa(s)
 }
 const fromB64 = (t) => Uint8Array.from(atob(t), (c) => c.charCodeAt(0))
+const toB64url = (bytes) =>
+  toB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 
 /** Whether this browser can do WebAuthn at all. PRF specifically can't be known
  *  until we try, so creation still has to handle its absence. */
@@ -39,22 +41,36 @@ export function passkeySupported() {
   )
 }
 
-const NO_PRF = "This device's passkey can't derive a key (no PRF support)"
+const CANT_DERIVE = "This device's passkey can't derive a key"
 
-// Pull the PRF output out of a create() or get() result, or null if it isn't
-// there. Browsers differ on when results arrive: Chrome can return them from
-// create(), others only from a get() — so callers try create first, then fall
-// back. `enabled === false` is a firm "this authenticator has no PRF", which we
-// surface rather than pointlessly retrying.
-function prfResult(credential) {
-  const prf = credential?.getClientExtensionResults?.().prf
-  if (prf?.results?.first) return new Uint8Array(prf.results.first)
-  if (prf && prf.enabled === false) throw new Error(NO_PRF)
-  return null
+// Distinguish the three failure shapes so a report from a real device pins down
+// the cause instead of just saying "no PRF":
+//   - no prf output at all  -> the provider didn't process the extension
+//   - enabled === false     -> the passkey has no PRF (no hmac-secret)
+//   - enabled, no results   -> PRF ran but returned nothing (a request problem)
+function prfDiagnostic(prf) {
+  if (!prf) return `${CANT_DERIVE} — this passkey provider didn't offer PRF`
+  if (prf.enabled === false) return `${CANT_DERIVE} — this passkey has no PRF (hmac-secret)`
+  return `${CANT_DERIVE} — PRF was enabled but returned no value`
 }
 
+// The PRF output from a create() or get() result, or null if absent. Browsers
+// differ on when results arrive: Chrome can return them from create(), others
+// only from a get() — so callers try create first, then fall back.
+function prfBytesOf(credential) {
+  const prf = credential?.getClientExtensionResults?.().prf
+  const first = prf?.results?.first
+  return { prf, bytes: first ? new Uint8Array(first) : null }
+}
+
+const prfValues = () => ({ first: PRF_SALT })
+
 // Evaluate PRF for a set of credentials in one get() ceremony; returns which
-// credential answered and the secret it produced.
+// credential answered and the secret it produced. Requests PRF both ways —
+// top-level `eval` and per-credential `evalByCredential` — because some Chrome
+// builds honour only the latter once `allowCredentials` is set. User
+// verification is required: the hmac-secret behind PRF is released only when it
+// happens.
 async function evaluatePRF(allowCredentials) {
   const assertion = await navigator.credentials.get({
     publicKey: {
@@ -66,13 +82,20 @@ async function evaluatePRF(allowCredentials) {
         type: 'public-key',
         id: fromB64(id),
       })),
-      userVerification: 'preferred',
-      extensions: { prf: { eval: { first: PRF_SALT } } },
+      userVerification: 'required',
+      extensions: {
+        prf: {
+          eval: prfValues(),
+          evalByCredential: Object.fromEntries(
+            allowCredentials.map((id) => [toB64url(fromB64(id)), prfValues()])
+          ),
+        },
+      },
     },
   })
-  const prf = prfResult(assertion)
-  if (!prf) throw new Error(NO_PRF)
-  return { credentialId: toB64(new Uint8Array(assertion.rawId)), prf }
+  const { prf, bytes } = prfBytesOf(assertion)
+  if (!bytes) throw new Error(prfDiagnostic(prf))
+  return { credentialId: toB64(new Uint8Array(assertion.rawId)), prf: bytes }
 }
 
 /** Create a passkey (enabling PRF), then derive its secret. Returns the pieces a
@@ -92,18 +115,22 @@ export async function createPasskey({ userId, userName }) {
         { type: 'public-key', alg: -257 },
       ],
       authenticatorSelection: {
-        residentKey: 'discouraged',
-        userVerification: 'preferred',
+        residentKey: 'preferred',
+        userVerification: 'required',
       },
-      extensions: { prf: { eval: { first: PRF_SALT } } },
+      extensions: { prf: { eval: prfValues() } },
     },
   })
   if (!cred) throw new Error('Passkey setup was cancelled')
   const credentialId = toB64(new Uint8Array(cred.rawId))
   // Best case, and the common one on Chrome/Android: the secret comes back on
-  // the create itself — no second prompt. Only if it doesn't do we fall back to
-  // a get() to evaluate it (prfResult throws early if PRF is truly unsupported).
-  const prfBytes = prfResult(cred) ?? (await evaluatePRF([credentialId])).prf
+  // the create itself — no second prompt. A firm enabled:false means no PRF at
+  // all, so don't bother with a get. Otherwise fall back to a get() to derive.
+  const created = prfBytesOf(cred)
+  if (created.prf && created.prf.enabled === false) {
+    throw new Error(prfDiagnostic(created.prf))
+  }
+  const prfBytes = created.bytes ?? (await evaluatePRF([credentialId])).prf
   return { credentialId, prfBytes, label: `passkey · ${new Date().toISOString().slice(0, 10)}` }
 }
 
