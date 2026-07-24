@@ -13,6 +13,7 @@
 export function readView(hash = window.location.hash) {
   const h = hash.replace(/^#/, '')
   if (h === 'settings') return { view: 'settings' }
+  if (h === 'new-bill') return { view: 'newbill' }
   const group = h.match(/^group\/(-?\d+)$/)
   if (group) return { view: 'group', id: Number(group[1]) }
   return { view: 'list' }
@@ -21,6 +22,7 @@ export function readView(hash = window.location.hash) {
 /** The fragment for a view. The list has none, so it reads as a clean URL. */
 export function viewHash({ view, id }) {
   if (view === 'settings') return '#settings'
+  if (view === 'newbill') return '#new-bill'
   if (view === 'group') return `#group/${id}`
   return ''
 }

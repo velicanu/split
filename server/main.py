@@ -27,7 +27,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def reset_if_stale(conn):
@@ -220,6 +220,55 @@ def init_db():
             " ciphertext TEXT NOT NULL,"
             " PRIMARY KEY (user_id, provider, recipient_kind, recipient_id))"
         )
+        # A standalone shared bill: one receipt, split by claiming, no accounts
+        # for the people claiming. See plan/15.
+        #
+        # `snapshot` is the sealed static half — items, who paid, tax/tip/total,
+        # receipt ids — set once by the authenticated creator and never changed.
+        # The server stores it opaquely, exactly like an event payload. The bill
+        # key that opens it rides in the link fragment and never reaches here.
+        #
+        # `token` is the bearer capability the link carries: presenting it (as a
+        # header) lets anyone read the bill and join it. Checked with a
+        # constant-time compare, like a group's read_token.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bills ("
+            " id TEXT PRIMARY KEY,"
+            " token TEXT NOT NULL,"
+            " snapshot TEXT NOT NULL,"
+            " created_by INTEGER NOT NULL REFERENCES users(id),"
+            " created_at TEXT NOT NULL DEFAULT (datetime('now')))"
+        )
+        # The mutable half: one row per participant. The creator seeds ghosts
+        # (the diners they already know) with a name and no secret; a link-opener
+        # then either binds a secret to a ghost (claiming it, first bind wins) or
+        # inserts a new row for themselves. `name` and `claims` are sealed under
+        # the bill key — the server never sees who anyone is or what they took.
+        #
+        # `secret` is the account-less stand-in for membership: minted by the
+        # browser at join, it both makes claim-once enforceable (a ghost can be
+        # bound once) and gates edits to that participant's own claims. It is a
+        # bearer token the server compares, never user content. See plan/15.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bill_participants ("
+            " bill_id TEXT NOT NULL REFERENCES bills(id),"
+            " participant_id INTEGER NOT NULL,"
+            " name TEXT NOT NULL,"
+            " claims TEXT,"
+            " secret TEXT,"
+            " PRIMARY KEY (bill_id, participant_id))"
+        )
+        # The receipt image, encrypted under the bill key. Same content-addressed
+        # shape as group receipts (id is the BLAKE2b-256 of the ciphertext), but
+        # keyed by bill and reachable with the bill token rather than a
+        # membership, so account-less claimers can see the photo.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bill_receipts ("
+            " bill_id TEXT NOT NULL REFERENCES bills(id),"
+            " id TEXT NOT NULL,"
+            " bytes BLOB NOT NULL,"
+            " PRIMARY KEY (bill_id, id))"
+        )
 
 
 def verify_sig(pubkey_b64: str, message: bytes, sig_b64: str) -> bool:
@@ -316,6 +365,45 @@ class ProviderIn(BaseModel):
 
 class ActiveIn(BaseModel):
     provider: str
+
+
+class BillParticipantIn(BaseModel):
+    # A seeded ghost: a client-chosen id and a sealed name, no secret. Whoever
+    # opens the link binds a secret to it later, or adds themselves instead.
+    participant_id: int
+    name: str
+
+
+class BillReceiptIn(BaseModel):
+    receipt_id: str
+    ciphertext: str
+
+
+class BillCreate(BaseModel):
+    # The sealed static half, plus the diners the creator already knows.
+    snapshot: str
+    participants: list[BillParticipantIn] = []
+    receipts: list[BillReceiptIn] = []
+
+
+class BillJoinIn(BaseModel):
+    # Adding yourself: a fresh id, a sealed name, and the secret that will own
+    # your claims from here on.
+    participant_id: int
+    name: str
+    secret: str
+
+
+class BillClaimGhostIn(BaseModel):
+    # Taking over a seeded ghost. The id is in the path; this binds the secret.
+    secret: str
+
+
+class BillClaimsIn(BaseModel):
+    # Editing my own claims: the secret proves the row is mine, the sealed blob
+    # is the new set of item ids.
+    secret: str
+    claims: str
 
 
 app = FastAPI()
@@ -1069,6 +1157,191 @@ def get_receipt(group_id: int, receipt_id: str, request: Request):
         # Opaque bytes, never rendered by the browser: the client decrypts and
         # decides how to display. That also retires the stored-XSS worry that
         # came with serving user content under an image type.
+        media_type="application/octet-stream",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=31536000, immutable",
+        },
+    )
+
+
+# --- shared bills (plan/15) --------------------------------------------
+#
+# A bill is its own resource, deliberately not bolted onto the account-coupled
+# group model. The creator (authenticated) sets the sealed static snapshot and
+# seeds ghosts; everyone else reaches it with the bill token from the link, no
+# account. Writes are gated by a per-participant secret rather than a session.
+
+BILL_TOKEN_HEADER = "X-Bill-Token"
+
+
+def bill_access(conn, bill_id: str, request: Request):
+    """Anyone presenting the bill's token may read it and join it. Returns the
+    bill row, or 404 — the same answer whether the bill is missing or the token
+    is wrong, so the token stays opaque and a bill id is never confirmed to
+    someone who cannot open it."""
+    row = conn.execute(
+        "SELECT id, token, snapshot FROM bills WHERE id = ?", (bill_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "bill not found")
+    token = request.headers.get(BILL_TOKEN_HEADER)
+    if not token or not secrets.compare_digest(row["token"], token):
+        raise HTTPException(404, "bill not found")
+    return row
+
+
+@app.post("/api/bills")
+def create_bill(body: BillCreate, request: Request):
+    """Publish a bill. Authenticated: the creator scanned it in their logged-in
+    view, and requiring a session keeps anonymous bill-spam off the table. The
+    snapshot and every seeded name arrive already sealed under the bill key,
+    which the server never sees."""
+    user = require_user(request)
+    if not body.snapshot:
+        raise HTTPException(400, "bill snapshot required")
+    receipts = []
+    for r in body.receipts:
+        try:
+            raw = base64.b64decode(r.ciphertext, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(400, "not valid base64") from None
+        if not raw:
+            raise HTTPException(400, "receipt is empty")
+        if len(raw) > MAX_RECEIPT_BYTES:
+            raise HTTPException(413, "receipt is too large")
+        if r.receipt_id != content_id(raw):
+            raise HTTPException(400, "receipt id is not the hash of the content")
+        receipts.append((r.receipt_id, raw))
+
+    bill_id = secrets.token_urlsafe(9)
+    token = secrets.token_urlsafe(16)
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO bills (id, token, snapshot, created_by) VALUES (?, ?, ?, ?)",
+            (bill_id, token, body.snapshot, user["id"]),
+        )
+        for p in body.participants:
+            conn.execute(
+                "INSERT INTO bill_participants (bill_id, participant_id, name)"
+                " VALUES (?, ?, ?)",
+                (bill_id, p.participant_id, p.name),
+            )
+        for rid, raw in receipts:
+            conn.execute(
+                "INSERT OR IGNORE INTO bill_receipts (bill_id, id, bytes)"
+                " VALUES (?, ?, ?)",
+                (bill_id, rid, raw),
+            )
+    return {"id": bill_id, "token": token}
+
+
+@app.get("/api/bills/{bill_id}")
+def get_bill(bill_id: str, request: Request):
+    with db() as conn:
+        bill = bill_access(conn, bill_id, request)
+        rows = conn.execute(
+            "SELECT participant_id, name, claims, secret FROM bill_participants"
+            " WHERE bill_id = ? ORDER BY participant_id",
+            (bill_id,),
+        ).fetchall()
+    return {
+        "id": bill["id"],
+        "snapshot": bill["snapshot"],
+        "participants": [
+            {
+                "participant_id": r["participant_id"],
+                "name": r["name"],
+                "claims": r["claims"],
+                # Whether a seeded ghost is still free to claim. The secret that
+                # decides it never leaves the server.
+                "claimed": r["secret"] is not None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.post("/api/bills/{bill_id}/participants")
+def join_bill(bill_id: str, body: BillJoinIn, request: Request):
+    """Add yourself to a bill. The secret you mint here owns your claims; the
+    server stores it and checks it, never reads it."""
+    with db() as conn:
+        bill_access(conn, bill_id, request)
+        try:
+            conn.execute(
+                "INSERT INTO bill_participants (bill_id, participant_id, name, secret)"
+                " VALUES (?, ?, ?, ?)",
+                (bill_id, body.participant_id, body.name, body.secret),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "that participant id is taken") from None
+    return {"participant_id": body.participant_id}
+
+
+@app.post("/api/bills/{bill_id}/participants/{pid}/claim")
+def claim_bill_ghost(bill_id: str, pid: int, body: BillClaimGhostIn, request: Request):
+    """Take over a seeded ghost. First bind wins: the `secret IS NULL` guard on
+    the update is what makes claiming-once atomic even if two people race for
+    the same name at the table."""
+    with db() as conn:
+        bill_access(conn, bill_id, request)
+        cur = conn.execute(
+            "UPDATE bill_participants SET secret = ?"
+            " WHERE bill_id = ? AND participant_id = ? AND secret IS NULL",
+            (body.secret, bill_id, pid),
+        )
+        if not cur.rowcount:
+            exists = conn.execute(
+                "SELECT 1 FROM bill_participants"
+                " WHERE bill_id = ? AND participant_id = ?",
+                (bill_id, pid),
+            ).fetchone()
+            raise HTTPException(
+                409 if exists else 404,
+                "that person has already been claimed"
+                if exists
+                else "no such person on this bill",
+            )
+    return {"participant_id": pid}
+
+
+@app.put("/api/bills/{bill_id}/participants/{pid}/claims")
+def set_bill_claims(bill_id: str, pid: int, body: BillClaimsIn, request: Request):
+    """Edit my own claims. The secret proves the row is mine — nobody else with
+    the link can rewrite what I claimed. An unclaimed ghost has no secret, so it
+    cannot be written to until someone joins as it."""
+    with db() as conn:
+        bill_access(conn, bill_id, request)
+        row = conn.execute(
+            "SELECT secret FROM bill_participants"
+            " WHERE bill_id = ? AND participant_id = ?",
+            (bill_id, pid),
+        ).fetchone()
+        if not row or row["secret"] is None:
+            raise HTTPException(404, "no such person on this bill")
+        if not secrets.compare_digest(row["secret"], body.secret):
+            raise HTTPException(403, "these are not your claims to change")
+        conn.execute(
+            "UPDATE bill_participants SET claims = ?"
+            " WHERE bill_id = ? AND participant_id = ?",
+            (body.claims, bill_id, pid),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/bills/{bill_id}/receipts/{receipt_id}")
+def get_bill_receipt(bill_id: str, receipt_id: str, request: Request):
+    with db() as conn:
+        bill_access(conn, bill_id, request)
+        row = conn.execute(
+            "SELECT bytes FROM bill_receipts WHERE bill_id = ? AND id = ?",
+            (bill_id, receipt_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "receipt not found")
+    return Response(
+        content=row["bytes"],
         media_type="application/octet-stream",
         headers={
             "X-Content-Type-Options": "nosniff",
