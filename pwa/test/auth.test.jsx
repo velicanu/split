@@ -629,6 +629,8 @@ function fakeAuthenticator({ prf = 'create' } = {}) {
         }
       },
       async get({ publicKey }) {
+        // Captured so a test can assert how PRF was requested.
+        globalThis.__lastPrfGet = publicKey.extensions?.prf
         for (const c of publicKey.allowCredentials) {
           const key = b64(new Uint8Array(c.id))
           if (creds.has(key)) {
@@ -644,6 +646,7 @@ function fakeAuthenticator({ prf = 'create' } = {}) {
   })
   return () => {
     delete globalThis.PublicKeyCredential
+    delete globalThis.__lastPrfGet
     Object.defineProperty(globalThis.navigator, 'credentials', {
       configurable: true,
       value: undefined,
@@ -683,6 +686,13 @@ describe('passkeys', () => {
       await addPasskey(account, { userId: me.id, userName: 'v' })
       await forgetDeviceKey()
       assert.equal((await enrolWithPasskey({ login_handle: 'v' })).login_handle, 'v')
+      // The get() must request PRF per-credential, not only top-level — some
+      // Chrome builds honour only that once allowCredentials is set.
+      assert.ok(
+        globalThis.__lastPrfGet?.evalByCredential &&
+          Object.keys(globalThis.__lastPrfGet.evalByCredential).length,
+        'PRF was requested by credential'
+      )
     } finally {
       restore()
     }
@@ -696,7 +706,7 @@ describe('passkeys', () => {
       const account = await unlockAccount({ login_handle: 'v', password: 'pw' })
       await assert.rejects(
         () => addPasskey(account, { userId: 1, userName: 'v' }),
-        /no PRF support/
+        /no PRF/
       )
     } finally {
       restore()
