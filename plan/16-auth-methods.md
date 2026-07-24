@@ -67,6 +67,13 @@ A fixed PRF salt is shared across an account's passkeys, so a fresh device can
 evaluate PRF over *all* of them in one prompt and let the authenticator answer
 for whichever it holds.
 
+**Provider caveat:** PRF is an optional extension, so a passkey that signs you in
+to every other site can still fail here — a provider can support passkey *login*
+without implementing PRF (KeePassDX, for one). Split fails fast with an actionable
+message when it does; password and recovery always work. The full explanation,
+which providers support PRF, and upstream tracking are in
+[passkey-prf-compatibility.md](passkey-prf-compatibility.md).
+
 **Precondition, not a server role:** WebAuthn is only exposed on a secure context
 (HTTPS, or `localhost`) with a real domain as the RP id — never a bare IP. This
 is the *browser's* rule about the page, independent of our server. It costs the
