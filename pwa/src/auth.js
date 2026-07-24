@@ -163,31 +163,13 @@ export async function enrol({ login_handle, password }) {
 }
 
 /** Fresh device, unlocked with the recovery code. */
-export async function enrolWithRecovery({ login_handle, code }) {
-  const { wraps } = await fetchWraps(login_handle)
-  const wrap = wraps.find((w) => w.method === 'recovery')
-  if (!wrap) throw new Error('No recovery code set for this account')
-  const account = await unwrapAccountKeyRecovery(wrap, decodeRecoveryCode(code))
-  return finishEnrol(account)
+export async function enrolWithRecovery(args) {
+  return finishEnrol(await unlockWithRecovery(args))
 }
 
-/** Fresh device, unlocked with a passkey. One prompt covers every passkey on
- *  the account: the authenticator answers for whichever it holds, and its PRF
- *  output unwraps that passkey's wrap. Nothing about the passkey reaches the
- *  server. */
-export async function enrolWithPasskey({ login_handle }) {
-  const { wraps } = await fetchWraps(login_handle)
-  const passkeys = wraps.filter((w) => w.method === 'passkey')
-  if (!passkeys.length) throw new Error('No passkey set for this account')
-  const { credentialId, prfBytes } = await passkeyPRF(
-    passkeys.map((w) => JSON.parse(w.params).credential_id)
-  )
-  const wrap = passkeys.find(
-    (w) => JSON.parse(w.params).credential_id === credentialId
-  )
-  if (!wrap) throw new Error('That passkey is not on this account')
-  const account = await unwrapAccountKeyPasskey(wrap, prfBytes)
-  return finishEnrol(account)
+/** Fresh device, unlocked with a passkey. */
+export async function enrolWithPasskey(args) {
+  return finishEnrol(await unlockWithPasskey(args))
 }
 
 /** Re-wrap the account key under a new password. Needs the old one, because the
@@ -201,14 +183,47 @@ export async function changePassword({ login_handle, current, next }) {
   await api('wraps', await wrapAccountKey(account, next), 'POST')
 }
 
-/** Re-derive the account key from the password wrap. Adding a new unlock method
- *  from a logged-in device needs the account key, which the device deliberately
- *  never holds — so it is unwrapped fresh here and dropped. */
-export async function unlockAccount({ login_handle, password }) {
+// Re-derive the account key from an existing wrap, without the device ever
+// holding it. There is one unlock per method, and *any* of them will do — which
+// is what lets you add a new method after removing the password. Adding a method
+// needs the account key; the device deliberately never caches it, so it is
+// unwrapped fresh and dropped. Used both for enrolling a fresh device and for
+// adding a wrap from a signed-in one.
+
+export async function unlockWithPassword({ login_handle, password }) {
   const { wraps } = await fetchWraps(login_handle)
   const wrap = wraps.find((w) => w.method === 'password')
-  if (!wrap) throw new Error('This account has no password to unlock with')
+  if (!wrap) throw new Error('This account has no password')
   return unwrapAccountKey(wrap, password)
+}
+
+export async function unlockWithRecovery({ login_handle, code }) {
+  const { wraps } = await fetchWraps(login_handle)
+  const wrap = wraps.find((w) => w.method === 'recovery')
+  if (!wrap) throw new Error('This account has no recovery code')
+  return unwrapAccountKeyRecovery(wrap, decodeRecoveryCode(code))
+}
+
+/** One prompt covers every passkey on the account: the authenticator answers for
+ *  whichever it holds, and its PRF output unwraps that passkey's wrap. */
+export async function unlockWithPasskey({ login_handle }) {
+  const { wraps } = await fetchWraps(login_handle)
+  const passkeys = wraps.filter((w) => w.method === 'passkey')
+  if (!passkeys.length) throw new Error('This account has no passkey')
+  const { credentialId, prfBytes } = await passkeyPRF(
+    passkeys.map((w) => JSON.parse(w.params).credential_id)
+  )
+  const wrap = passkeys.find(
+    (w) => JSON.parse(w.params).credential_id === credentialId
+  )
+  if (!wrap) throw new Error('That passkey is not on this account')
+  return unwrapAccountKeyPasskey(wrap, prfBytes)
+}
+
+/** Set or replace the password wrap. Lets a password be added back after it was
+ *  removed (unlock with a passkey or recovery code first). */
+export async function addPasswordWrap(account, password) {
+  await api('wraps', await wrapAccountKey(account, password), 'POST')
 }
 
 /** Mint a fresh recovery code, wrap the account key under it, and store the wrap

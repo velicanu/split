@@ -8,11 +8,14 @@ import { api } from '../api'
 import { saveApiKey } from '../aikeys'
 import {
   addPasskey,
+  addPasswordWrap,
   addRecoveryWrap,
   changePassword,
   listWraps,
   removeWrap,
-  unlockAccount,
+  unlockWithPasskey,
+  unlockWithPassword,
+  unlockWithRecovery,
 } from '../auth'
 import { passkeySupported } from '../webauthn'
 import { loadTheme, setTheme } from '../theme'
@@ -178,8 +181,9 @@ export function Settings({ ai, user, onChanged, onClose }) {
 
 // The ways back into this account: the password, a recovery code, and any
 // passkeys. Adding one needs the account key, which this device never holds, so
-// each add unlocks it fresh with the password. Removing the weak password once
-// a passkey and code exist is allowed — the server keeps at least one. See
+// each add unlocks it fresh — with *any* method the account still has, not only
+// the password. That is what stops "add a passkey, then remove the password"
+// from being a dead end. The server always keeps at least one method. See
 // plan/16.
 const WRAP_LABEL = {
   password: 'Password',
@@ -188,11 +192,21 @@ const WRAP_LABEL = {
 const labelFor = (w) =>
   WRAP_LABEL[w.method] ?? (JSON.parse(w.params || '{}').label || 'Passkey')
 
+const ADD_VERB = {
+  passkey: 'add a passkey',
+  recovery: 'make a recovery code',
+  password: 'set a password',
+}
+
 function SignInMethods({ user }) {
   const [wraps, setWraps] = useState(null)
-  // Which add is in flight ('recovery' | 'passkey'), gated behind the password.
+  // Which add is in flight ('passkey' | 'recovery' | 'password').
   const [adding, setAdding] = useState(null)
+  // The secret used to unlock the account key, for whichever method we have.
   const [password, setPassword] = useState('')
+  const [code, setCode] = useState('')
+  // For adding/replacing the password.
+  const [newPassword, setNewPassword] = useState('')
   const [newCode, setNewCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -208,25 +222,34 @@ function SignInMethods({ user }) {
     setError('')
     setNewCode('')
     setPassword('')
+    setCode('')
+    setNewPassword('')
     setAdding(kind)
+  }
+
+  const has = (m) => (wraps || []).some((w) => w.method === m)
+  // Unlock with whatever the account still has. Password is simplest when it's
+  // there; otherwise a passkey or the recovery code.
+  const unlockVia = has('password') ? 'password' : has('passkey') ? 'passkey' : 'recovery'
+
+  async function unlock() {
+    const login_handle = user.login_handle
+    if (unlockVia === 'password') return unlockWithPassword({ login_handle, password })
+    if (unlockVia === 'passkey') return unlockWithPasskey({ login_handle })
+    return unlockWithRecovery({ login_handle, code })
   }
 
   async function confirmAdd(e) {
     e.preventDefault()
     setError('')
+    if (adding === 'password' && !newPassword) return setError('Enter a password')
     setBusy(true)
     try {
-      const account = await unlockAccount({
-        login_handle: user.login_handle,
-        password,
-      })
-      if (adding === 'recovery') {
-        setNewCode(await addRecoveryWrap(account))
-      } else {
-        await addPasskey(account, { userId: user.id, userName: user.login_handle })
-      }
-      setPassword('')
-      setAdding(null)
+      const account = await unlock()
+      if (adding === 'recovery') setNewCode(await addRecoveryWrap(account))
+      else if (adding === 'password') await addPasswordWrap(account, newPassword)
+      else await addPasskey(account, { userId: user.id, userName: user.login_handle })
+      start(null)
       load()
     } catch (err) {
       setError(err.message)
@@ -246,7 +269,6 @@ function SignInMethods({ user }) {
   }
 
   if (wraps === null) return null
-  const hasRecovery = wraps.some((w) => w.method === 'recovery')
 
   return (
     <div>
@@ -274,16 +296,45 @@ function SignInMethods({ user }) {
 
       {adding ? (
         <form onSubmit={confirmAdd}>
-          <p className="muted">
-            Enter your password to {adding === 'passkey' ? 'add a passkey' : 'make a recovery code'}.
-          </p>
-          <input
-            type="password"
-            placeholder="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+          {/* Unlock the account key with a method you have, then the new one is
+              added. Passkey unlock needs no field — it prompts on confirm. */}
+          {unlockVia === 'password' ? (
+            <>
+              <p className="muted">Enter your password to {ADD_VERB[adding]}.</p>
+              <input
+                type="password"
+                placeholder="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </>
+          ) : unlockVia === 'recovery' ? (
+            <>
+              <p className="muted">Enter your recovery code to {ADD_VERB[adding]}.</p>
+              <input
+                placeholder="recovery code"
+                autoComplete="off"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+            </>
+          ) : (
+            <p className="muted">
+              Confirm with your passkey to {ADD_VERB[adding]}.
+            </p>
+          )}
+
+          {adding === 'password' && (
+            <input
+              type="password"
+              placeholder="new password"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+            />
+          )}
+
           <div className="row-actions">
             <button type="submit" disabled={busy}>
               {busy ? 'working…' : 'Confirm'}
@@ -301,8 +352,13 @@ function SignInMethods({ user }) {
             </button>
           )}
           <button className="link" onClick={() => start('recovery')}>
-            {hasRecovery ? 'Replace recovery code' : 'Create recovery code'}
+            {has('recovery') ? 'Replace recovery code' : 'Create recovery code'}
           </button>
+          {!has('password') && (
+            <button className="link" onClick={() => start('password')}>
+              Set a password
+            </button>
+          )}
         </div>
       )}
       {error && <p className="error">{error}</p>}
