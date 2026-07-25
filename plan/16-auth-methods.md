@@ -68,11 +68,9 @@ evaluate PRF over *all* of them in one prompt and let the authenticator answer
 for whichever it holds.
 
 **Provider caveat:** PRF is an optional extension, so a passkey that signs you in
-to every other site can still fail here — a provider can support passkey *login*
-without implementing PRF (KeePassDX, for one). Split fails fast with an actionable
-message when it does; password and recovery always work. The full explanation,
-which providers support PRF, and upstream tracking are in
-[passkey-prf-compatibility.md](passkey-prf-compatibility.md).
+to every other site can still fail here if its provider supports passkey *login*
+without implementing PRF. Split fails fast with an actionable message when it
+does; password and recovery always work.
 
 **Precondition, not a server role:** WebAuthn is only exposed on a secure context
 (HTTPS, or `localhost`) with a real domain as the RP id — never a bare IP. This
