@@ -12,7 +12,6 @@
 import { api } from './api'
 import {
   contentId,
-  decryptBytes,
   decryptPayload,
   encryptBytes,
   encryptPayload,
@@ -20,6 +19,11 @@ import {
 } from './crypto'
 import { prepareImage } from './ai'
 import { receiptWeights, simplify, splitByWeights } from './ledger'
+import {
+  fetchReceiptImage,
+  forgetReceiptImages,
+  receiptImageUrl,
+} from './receiptimage'
 
 const header = (token) => ({ 'X-Bill-Token': token })
 
@@ -216,29 +220,16 @@ export function loadMe(billId) {
 
 // --- receipt image, via the bill token --------------------------------
 
-async function fetchBillReceipt(billId, receiptId, { key, token }) {
-  const res = await fetch(`/api/bills/${billId}/receipts/${receiptId}`, {
-    headers: header(token),
-  })
-  if (!res.ok) throw new Error("Couldn't load that receipt")
-  const sealed = new Uint8Array(await res.arrayBuffer())
-  if ((await contentId(sealed)) !== receiptId) {
-    throw new Error('That receipt does not match its address')
-  }
-  return decryptBytes(key, sealed)
+export async function billReceiptUrl(billId, receiptId, { key, token }) {
+  return receiptImageUrl(receiptId, () =>
+    fetchReceiptImage({
+      url: `/api/bills/${billId}/receipts/${receiptId}`,
+      id: receiptId,
+      key,
+      headers: header(token),
+    })
+  )
 }
 
-const urls = new Map()
-
-export async function billReceiptUrl(billId, receiptId, access) {
-  if (urls.has(receiptId)) return urls.get(receiptId)
-  const bytes = await fetchBillReceipt(billId, receiptId, access)
-  const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
-  urls.set(receiptId, url)
-  return url
-}
-
-export function forgetBillReceipts() {
-  for (const url of urls.values()) URL.revokeObjectURL(url)
-  urls.clear()
-}
+// Shares the object-URL cache with group receipts (see receiptimage.js).
+export const forgetBillReceipts = forgetReceiptImages
