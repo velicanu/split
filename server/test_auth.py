@@ -535,6 +535,7 @@ def test_init_db_actually_rebuilds_a_stale_database():
     import sqlite3
     import tempfile as tf
 
+    import db
     import main
 
     path = os.path.join(tf.mkdtemp(), "deployed.db")
@@ -549,12 +550,13 @@ def test_init_db_actually_rebuilds_a_stale_database():
     conn.commit()
     conn.close()
 
-    original = main.DB_PATH
+    # DB_PATH now lives in the db module, which connect() reads — patch it there.
+    original = db.DB_PATH
     try:
-        main.DB_PATH = path
+        db.DB_PATH = path
         main.init_db()
     finally:
-        main.DB_PATH = original
+        db.DB_PATH = original
 
     conn = sqlite3.connect(path)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
