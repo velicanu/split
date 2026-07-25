@@ -9,6 +9,7 @@
 import { api } from './api'
 import { contentId, encryptBytes } from './crypto'
 import { prepareImage } from './ai'
+import { base64ToBytes, bytesToBase64 } from './bytes'
 import { groupKey } from './groupkeys'
 import {
   fetchReceiptImage,
@@ -17,25 +18,18 @@ import {
   receiptImageUrl,
 } from './receiptimage'
 
-const b64 = (bytes) => {
-  let s = ''
-  for (const byte of bytes) s += String.fromCharCode(byte)
-  return btoa(s)
-}
-
 /** Downscale, encrypt, upload. Returns the content id to put on the expense. */
 export async function uploadReceipt(groupId, file) {
   const key = await groupKey(groupId)
   if (!key) throw new Error('No key for this group on this device')
 
   const { base64 } = await prepareImage(file)
-  const raw = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-  const sealed = await encryptBytes(key, raw)
+  const sealed = await encryptBytes(key, base64ToBytes(base64))
   const receipt_id = await contentId(sealed)
 
   await api(`groups/${groupId}/receipts`, {
     receipt_id,
-    ciphertext: b64(sealed),
+    ciphertext: bytesToBase64(sealed),
   })
   return receipt_id
 }

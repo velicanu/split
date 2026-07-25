@@ -14,7 +14,8 @@
 // See plan/11-identity-and-devices.md.
 
 import { api } from './api'
-import { loadDeviceKey, openSealedText, sealText } from './crypto'
+import { openSealedText, sealText } from './crypto'
+import { loadDeviceKey } from './store'
 
 /** Seal `apiKey` to every live device and to the account, then upload. */
 export async function saveApiKey(provider, apiKey) {

@@ -18,6 +18,7 @@ import {
   generateGroupKey,
 } from './crypto'
 import { prepareImage } from './ai'
+import { base64ToBytes, bytesToBase64 } from './bytes'
 import { receiptWeights, simplify, splitByWeights } from './ledger'
 import {
   fetchReceiptImage,
@@ -26,12 +27,6 @@ import {
 } from './receiptimage'
 
 const header = (token) => ({ 'X-Bill-Token': token })
-
-const bytesToB64 = (bytes) => {
-  let s = ''
-  for (const byte of bytes) s += String.fromCharCode(byte)
-  return btoa(s)
-}
 
 // A random positive participant id, small enough to stay a safe integer. Each
 // browser mints its own — the server enforces uniqueness — so no coordination
@@ -65,10 +60,9 @@ export async function createBill({ snapshot, participants = [], receiptFile }) {
   const receiptIds = []
   if (receiptFile) {
     const { base64 } = await prepareImage(receiptFile)
-    const raw = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
-    const sealed = await encryptBytes(key, raw)
+    const sealed = await encryptBytes(key, base64ToBytes(base64))
     const receipt_id = await contentId(sealed)
-    receipts.push({ receipt_id, ciphertext: bytesToB64(sealed) })
+    receipts.push({ receipt_id, ciphertext: bytesToBase64(sealed) })
     receiptIds.push(receipt_id)
   }
 

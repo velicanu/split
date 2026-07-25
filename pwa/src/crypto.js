@@ -16,53 +16,12 @@ import sodium from 'libsodium-wrappers-sumo'
 
 const ready = sodium.ready
 
-const DB = 'split-keys'
-const STORE = 'keys'
-const DEVICE_KEY = 'device'
-
 export const b64 = (bytes) => sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL)
 export const unb64 = (text) =>
   sodium.from_base64(text, sodium.base64_variants.ORIGINAL)
 
-// --- device key storage ------------------------------------------------
-
-function idb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB, 1)
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE)
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-async function idbGet(key) {
-  const db = await idb()
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(key)
-    req.onsuccess = () => resolve(req.result ?? null)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-async function idbPut(key, value) {
-  const db = await idb()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite')
-    tx.objectStore(STORE).put(value, key)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  })
-}
-
-async function idbDelete(key) {
-  const db = await idb()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readwrite')
-    tx.objectStore(STORE).delete(key)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  })
-}
+// Device-key and session *persistence* moved to store.js — this module is the
+// sealing/key-generation layer and holds no IndexedDB. See store.js.
 
 // --- keys --------------------------------------------------------------
 
@@ -92,19 +51,6 @@ export async function generateAccountKey() {
     box_privkey: b64(box.privateKey),
   }
 }
-
-export const loadDeviceKey = () => idbGet(DEVICE_KEY)
-export const saveDeviceKey = (key) => idbPut(DEVICE_KEY, key)
-export const forgetDeviceKey = () => idbDelete(DEVICE_KEY)
-
-// The last `me` this device saw, so an offline refresh has an identity to open
-// with rather than bouncing to the sign-in screen. Only who-you-are — id,
-// handle, display name — never key material. Cleared on logout with everything
-// else.
-const SESSION = 'session'
-export const loadSession = () => idbGet(SESSION)
-export const saveSession = (me) => idbPut(SESSION, me)
-export const forgetSession = () => idbDelete(SESSION)
 
 export async function sign(privkeyB64, message) {
   await ready

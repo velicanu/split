@@ -13,13 +13,8 @@
 // See plan/11-identity-and-devices.md.
 
 import { api } from './api'
-import { localGroupKey, saveGroupKey } from './store'
-import {
-  generateGroupKey,
-  loadDeviceKey,
-  openSealed,
-  sealTo,
-} from './crypto'
+import { loadDeviceKey, localGroupKey, saveGroupKey } from './store'
+import { generateGroupKey, openSealed, sealTo } from './crypto'
 
 const cache = new Map()
 

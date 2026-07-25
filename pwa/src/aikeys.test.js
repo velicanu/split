@@ -4,12 +4,8 @@ import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
 import { adoptApiKeysForNewDevice, loadAiSettings, saveApiKey } from './aikeys.js'
-import {
-  forgetDeviceKey,
-  generateAccountKey,
-  generateDeviceKey,
-  saveDeviceKey,
-} from './crypto.js'
+import { generateAccountKey, generateDeviceKey } from './crypto.js'
+import { forgetDeviceKey, saveDeviceKey } from './store.js'
 
 const API_KEY = 'sk-live-do-not-leak-me'
 
