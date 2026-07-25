@@ -6,6 +6,7 @@ import os
 import secrets
 import sqlite3
 import time
+from contextlib import contextmanager
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -19,10 +20,35 @@ COOKIE = "split_session"
 CHALLENGE_TTL_SECONDS = 300
 
 
-def db():
+def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@contextmanager
+def db():
+    """A connection scoped to one request: one transaction, then closed.
+
+    - **Foreign keys on.** SQLite leaves them off by default, which made every
+      `REFERENCES` clause decorative; enabling it makes the schema's integrity
+      real. Set before the transaction opens, since the pragma is a no-op inside
+      one.
+    - **WAL**, so a reader never blocks the writer.
+    - **Closed on exit.** The bare `sqlite3.connect` this replaced was only ever
+      committed (via `with conn`), never closed, so every request leaked a
+      connection object until GC reclaimed it.
+
+    `init_db` deliberately does NOT use this — its table drops must run with FK
+    off (see there)."""
+    conn = connect()
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
@@ -55,7 +81,11 @@ def reset_if_stale(conn):
 
 
 def init_db():
-    with db() as conn:
+    # DDL runs with foreign keys OFF (SQLite's default via connect(), not db()):
+    # reset_if_stale drops every table, and dropping a parent while a child still
+    # references it raises under FK enforcement. Runtime queries use db(), which
+    # turns FK on.
+    with connect() as conn:
         reset_if_stale(conn)
         # No password material here at all. The server authenticates a signature
         # from a registered device key, so it holds nothing that could be used
@@ -619,13 +649,16 @@ def revoke_device(device_id: str, request: Request):
         ).fetchone()
         if not row:
             raise HTTPException(404, "device not found")
+        # Sessions first, then the device: sessions reference devices, so with
+        # foreign keys enforced the child has to go before the parent. Dropping
+        # the sessions also makes revocation bite on the next request rather than
+        # whenever the cookie happens to expire.
+        #
         # Deleted, not tombstoned: a device that is gone fails every check a
         # revoked one would have, and nobody wants to scroll a list of browsers
         # they no longer use.
-        conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
-        # Drop its sessions too, so revocation takes effect on the next request
-        # rather than whenever its cookie happens to expire.
         conn.execute("DELETE FROM sessions WHERE device_id = ?", (device_id,))
+        conn.execute("DELETE FROM devices WHERE id = ?", (device_id,))
     return {"ok": True}
 
 
@@ -648,10 +681,12 @@ def logout(request: Request, response: Response):
                 "SELECT device_id FROM sessions WHERE token = ?", (token,)
             ).fetchone()
             if row:
-                conn.execute("DELETE FROM devices WHERE id = ?", (row["device_id"],))
+                # Sessions before the device — sessions reference devices, and
+                # foreign keys are enforced.
                 conn.execute(
                     "DELETE FROM sessions WHERE device_id = ?", (row["device_id"],)
                 )
+                conn.execute("DELETE FROM devices WHERE id = ?", (row["device_id"],))
             conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
     response.delete_cookie(COOKIE)
     return {"ok": True}
