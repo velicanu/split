@@ -1,7 +1,9 @@
-// Sign in or sign up. Every path resolves to a device key that can sign the
-// server's challenge (auth.js): a password, or — on a fresh device — a recovery
-// code. Signing up mints the account key and shows a recovery code once. See
-// plan/11, plan/16.
+// The front door: three equally-weighted pages — Sign in, Sign up, Pair — with
+// the methods laid out as peers rather than a primary plus hidden links. Sign in
+// offers passkey / password / recovery code, in that order; sign up offers
+// passkey / password (a recovery code is minted automatically). The 3-way nav is
+// invariant in order and layout, top and bottom, with the current page grayed.
+// See plan/16, plan/17.
 
 import { useState } from 'react'
 
@@ -15,51 +17,36 @@ import {
 import { passkeySupported } from '../webauthn'
 import { PairNewDevice } from './PairNewDevice'
 
+const PAGES = [
+  ['signin', 'Sign in'],
+  ['signup', 'Sign up'],
+  ['pair', 'Pair'],
+]
+
 export function Auth({ onAuth }) {
-  const [mode, setMode] = useState('signin')
-  // Pairing this device from one already signed in (plan/17).
-  const [pairing, setPairing] = useState(false)
-  // On a fresh device you can sign in with the password or a recovery code.
-  const [method, setMethod] = useState('password')
-  // Sign up secured by a passkey instead of a password.
-  const [signupPasskey, setSignupPasskey] = useState(false)
+  const [page, setPage] = useState('signin')
   const [handle, setHandle] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  // After signup: the code to show once, and the user to hand back once it's
-  // acknowledged.
+  // After signup: the recovery code to show once, and the user to hand back.
   const [recovery, setRecovery] = useState(null)
 
-  async function submit(e) {
-    e.preventDefault()
+  const go = (id) => {
+    setError('')
+    setPage(id)
+  }
+
+  // Wrap a method: require the handle, manage busy/error, surface failures.
+  const run = (fn) => async (e) => {
+    e?.preventDefault?.()
     setError('')
     if (!handle.trim()) return setError('Enter your handle')
     setBusy(true)
     try {
-      if (mode === 'signup') {
-        const args = {
-          login_handle: handle.trim(),
-          display_name: displayName.trim() || handle.trim(),
-        }
-        let result
-        if (signupPasskey) {
-          result = await signupWithPasskey(args)
-        } else {
-          if (!password) return setError('Enter a password')
-          result = await signup({ ...args, password })
-        }
-        const { recoveryCode, ...me } = result
-        setRecovery({ code: recoveryCode, me })
-      } else if (method === 'recovery') {
-        if (!code.trim()) return setError('Enter your recovery code')
-        onAuth(await enrolWithRecovery({ login_handle: handle.trim(), code }))
-      } else {
-        if (!password) return setError('Enter your password')
-        onAuth(await enrol({ login_handle: handle.trim(), password }))
-      }
+      await fn()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -67,18 +54,26 @@ export function Auth({ onAuth }) {
     }
   }
 
-  async function usePasskey() {
-    setError('')
-    if (!handle.trim()) return setError('Enter your handle first')
-    setBusy(true)
-    try {
-      onAuth(await enrolWithPasskey({ login_handle: handle.trim() }))
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setBusy(false)
-    }
-  }
+  const signupArgs = () => ({
+    login_handle: handle.trim(),
+    display_name: displayName.trim() || handle.trim(),
+  })
+  const afterSignup = ({ recoveryCode, ...me }) => setRecovery({ code: recoveryCode, me })
+
+  const withPasskey = run(async () => onAuth(await enrolWithPasskey({ login_handle: handle.trim() })))
+  const withPassword = run(async () => {
+    if (!password) return setError('Enter your password')
+    onAuth(await enrol({ login_handle: handle.trim(), password }))
+  })
+  const withRecovery = run(async () => {
+    if (!code.trim()) return setError('Enter your recovery code')
+    onAuth(await enrolWithRecovery({ login_handle: handle.trim(), code }))
+  })
+  const signupPasskey = run(async () => afterSignup(await signupWithPasskey(signupArgs())))
+  const signupPassword = run(async () => {
+    if (!password) return setError('Enter a password')
+    afterSignup(await signup({ ...signupArgs(), password }))
+  })
 
   async function copyCode() {
     try {
@@ -88,8 +83,8 @@ export function Auth({ onAuth }) {
     }
   }
 
-  // Shown once, right after signup. There is no second chance: the server never
-  // held the code, so it cannot show it again.
+  // Shown once, right after signup. The server never held the code, so there is
+  // no second chance to show it.
   if (recovery) {
     return (
       <main>
@@ -99,7 +94,12 @@ export function Auth({ onAuth }) {
           sign-in methods and your devices. Write it down or put it in a password
           manager — we can&rsquo;t show it again, and nobody can reset it for you.
         </p>
-        <input className="invite" readOnly value={recovery.code} onFocus={(e) => e.target.select()} />
+        <input
+          className="invite"
+          readOnly
+          value={recovery.code}
+          onFocus={(e) => e.target.select()}
+        />
         <div className="row-actions">
           <button className="link" onClick={copyCode}>
             copy
@@ -110,139 +110,118 @@ export function Auth({ onAuth }) {
     )
   }
 
-  if (pairing) {
-    return <PairNewDevice onPaired={onAuth} onCancel={() => setPairing(false)} />
-  }
-
-  const recoveryMode = mode === 'signin' && method === 'recovery'
-  const passkeySignup = mode === 'signup' && signupPasskey
+  const tabs = (
+    <div className="segmented">
+      {PAGES.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          className={page === id ? 'active' : ''}
+          disabled={page === id}
+          onClick={() => go(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+  const links = (
+    <p className="authnav muted">
+      {PAGES.map(([id, label], i) => (
+        <span key={id}>
+          {i > 0 && ' · '}
+          {page === id ? (
+            <span className="current">{label}</span>
+          ) : (
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault()
+                go(id)
+              }}
+            >
+              {label}
+            </a>
+          )}
+        </span>
+      ))}
+    </p>
+  )
 
   return (
     <main>
       <h1>Split</h1>
-      <form onSubmit={submit}>
-        <input
-          placeholder="handle"
-          value={handle}
-          onChange={(e) => setHandle(e.target.value)}
-          autoComplete="username"
-        />
-        {mode === 'signup' && (
-          <input
-            placeholder="display name (optional)"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-          />
-        )}
-        {recoveryMode ? (
-          <input
-            placeholder="recovery code"
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            autoComplete="off"
-          />
-        ) : passkeySignup ? (
-          <p className="muted">
-            You&rsquo;ll create a passkey when you sign up — no password to set.
-          </p>
-        ) : (
-          <input
-            type="password"
-            placeholder="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-          />
-        )}
-        <button type="submit" disabled={busy}>
-          {busy
-            ? 'working…'
-            : mode === 'signup'
-              ? passkeySignup
-                ? 'Sign up with a passkey'
-                : 'Sign up'
-              : 'Sign in on this device'}
-        </button>
-      </form>
-      {error && <p className="error">{error}</p>}
+      {tabs}
 
-      {mode === 'signup' && passkeySupported() && (
-        <p className="muted">
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault()
-              setError('')
-              setSignupPasskey((v) => !v)
-            }}
-          >
-            {signupPasskey ? 'Use a password instead' : 'Sign up with a passkey instead'}
-          </a>
-        </p>
-      )}
-
-      {mode === 'signin' && (
-        <p className="muted">
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault()
-              setError('')
-              setMethod(method === 'recovery' ? 'password' : 'recovery')
-            }}
-          >
-            {recoveryMode ? 'Use your password instead' : 'Use a recovery code instead'}
-          </a>
-          {passkeySupported() && (
-            <>
-              {' · '}
-              <a
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault()
-                  usePasskey()
-                }}
-              >
-                Use a passkey
-              </a>
-            </>
+      {page === 'pair' ? (
+        <PairNewDevice onPaired={onAuth} onCancel={() => go('signin')} />
+      ) : (
+        <>
+          <input
+            placeholder="handle"
+            value={handle}
+            onChange={(e) => setHandle(e.target.value)}
+            autoComplete="username"
+          />
+          {page === 'signup' && (
+            <input
+              placeholder="display name (optional)"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
           )}
-        </p>
+
+          <div className="methods">
+            {passkeySupported() && (
+              <div className="method">
+                <button
+                  type="button"
+                  onClick={page === 'signin' ? withPasskey : signupPasskey}
+                  disabled={busy}
+                >
+                  {page === 'signin' ? 'Sign in with a passkey' : 'Sign up with a passkey'}
+                </button>
+              </div>
+            )}
+            <form className="method" onSubmit={page === 'signin' ? withPassword : signupPassword}>
+              <input
+                type="password"
+                placeholder="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete={page === 'signin' ? 'current-password' : 'new-password'}
+              />
+              <button disabled={busy}>
+                {page === 'signin' ? 'Sign in with password' : 'Sign up with password'}
+              </button>
+            </form>
+            {page === 'signin' && (
+              <form className="method" onSubmit={withRecovery}>
+                <input
+                  placeholder="recovery code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  autoComplete="off"
+                />
+                <button disabled={busy}>Sign in with recovery code</button>
+              </form>
+            )}
+          </div>
+
+          {page === 'signup' && (
+            <p className="muted">
+              A recovery code is created for you and shown once after you sign up.
+            </p>
+          )}
+        </>
       )}
+
+      {error && <p className="error">{error}</p>}
       <p className="muted">
-        Your password never leaves this device — it unlocks your keys here. That
-        also means nobody can reset it for you.
+        Your secrets never leave this device — they unlock your keys here, so
+        nobody can reset them for you.
       </p>
-      <p>
-        {mode === 'signup' ? 'Have an account?' : 'No account?'}{' '}
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault()
-            setError('')
-            setMethod('password')
-            setSignupPasskey(false)
-            setMode(mode === 'signup' ? 'signin' : 'signup')
-          }}
-        >
-          {mode === 'signup' ? 'Sign in' : 'Sign up'}
-        </a>
-      </p>
-      {mode === 'signin' && (
-        <p className="muted">
-          Already signed in on another device?{' '}
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault()
-              setError('')
-              setPairing(true)
-            }}
-          >
-            Pair this device
-          </a>
-        </p>
-      )}
+      {links}
     </main>
   )
 }

@@ -43,20 +43,20 @@ export function PairNewDevice({ onPaired, onCancel }) {
 
   if (error) {
     return (
-      <main>
-        <h1>Split</h1>
+      <>
         <p className="error">{error}</p>
-        <button className="link" onClick={onCancel}>
-          back
-        </button>
-      </main>
+        {onCancel && (
+          <button className="link" onClick={onCancel}>
+            back
+          </button>
+        )}
+      </>
     )
   }
   if (!pending) return null
 
   return (
-    <main>
-      <h1>Add this device</h1>
+    <section>
       <p className="muted">
         On a device you&rsquo;re already signed in on, open{' '}
         <strong>Settings → Pair a new device</strong>, then scan this or type the
@@ -73,9 +73,6 @@ export function PairNewDevice({ onPaired, onCancel }) {
       </p>
       <p className="fingerprint">{pending.fingerprint}</p>
       <p className="muted">Waiting for approval…</p>
-      <button className="link" onClick={onCancel}>
-        cancel
-      </button>
-    </main>
+    </section>
   )
 }
