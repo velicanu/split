@@ -19,6 +19,7 @@ import {
   removeWrap,
   resume,
   signup,
+  signupWithPasskey,
   unlockWithPasskey,
   unlockWithPassword,
 } from '../src/auth.js'
@@ -794,6 +795,53 @@ describe('passkeys', () => {
 
       const passkeys = (await listWraps('v')).filter((w) => w.method === 'passkey')
       assert.equal(passkeys.length, 2, 'a second passkey was added with no password')
+    } finally {
+      restore()
+    }
+  })
+
+  test('signing up with a passkey — no password — then unlocking a fresh device', async () => {
+    const server = fakeServer()
+    const restore = fakeAuthenticator()
+    try {
+      const me = await signupWithPasskey({ login_handle: 'v', display_name: 'V' })
+      assert.equal(me.login_handle, 'v')
+      assert.ok(me.recoveryCode, 'a recovery code is still minted')
+      assert.deepEqual(
+        server.wraps.v.map((w) => w.method).sort(),
+        ['passkey', 'recovery'],
+        'secured by a passkey + recovery, no password'
+      )
+
+      // A fresh device gets in with the passkey alone.
+      await forgetDeviceKey()
+      assert.equal(
+        (await enrolWithPasskey({ login_handle: 'v' })).login_handle,
+        'v'
+      )
+    } finally {
+      restore()
+    }
+  })
+
+  test('a passkey signup’s recovery code also gets a fresh device in', async () => {
+    fakeServer()
+    const restore = fakeAuthenticator()
+    try {
+      const { recoveryCode } = await signupWithPasskey({
+        login_handle: 'v',
+        display_name: 'V',
+      })
+      await forgetDeviceKey()
+      assert.equal(
+        (await enrolWithRecovery({ login_handle: 'v', code: recoveryCode })).login_handle,
+        'v'
+      )
+      // There is no password to fall back on.
+      await assert.rejects(
+        () => enrol({ login_handle: 'v', password: 'anything' }),
+        /handle or password/i
+      )
     } finally {
       restore()
     }

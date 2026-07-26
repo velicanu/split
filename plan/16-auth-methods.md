@@ -113,12 +113,20 @@ passkey and recovery wraps, so writes are per-wrap.
   removing a wrap closes a *door to `A`*, it does not re-key anything already
   decrypted.
 
+## Signup
+
+Every account is born with **two** wraps: a primary — a **password** *or* a
+**passkey** — plus a recovery code, always. The passkey path is passwordless: the
+create+PRF ceremony runs *before* the account is posted, so a cancelled prompt or
+a provider without PRF leaves nothing created and the form falls back to a
+password. Either way the recovery code is shown once.
+
 ## Deliberately not doing (yet)
 
 - **Device pairing** (QR / short code + fingerprint) — designed in
   [11](11-identity-and-devices.md), the natural next method: authorise a new
   device from an existing one without `A` at all.
-- **Passwordless signup** — signup still sets a password; recovery-only accounts
-  can come once the flows above have proven out.
+- **Recovery-only signup** — signup still sets a primary (password or passkey)
+  alongside the recovery code; a code-only account can come later.
 - **Server-side WebAuthn** (discoverable-credential login, attestation) — not
   needed while passkeys are only a wrap method.
