@@ -39,8 +39,17 @@ describe('the auth front door', () => {
     const methods = methodButtons()
     assert.ok(methods.includes('Sign up with password'))
     assert.ok(!methods.some((m) => m.includes('recovery')), 'no recovery method on sign up')
-    assert.ok($('input[placeholder="display name (optional)"]'), 'display name field')
+    const display = $('input[placeholder="display name (optional)"]')
+    assert.ok(display && !display.className.includes('invisible'), 'display name shown on sign up')
     assert.ok(text().includes('recovery code is created for you'))
+  })
+
+  test('the display-name row is reserved on sign in so the cards do not shift', async () => {
+    await mount(<Auth onAuth={() => {}} />)
+    const display = $('input[placeholder="display name (optional)"]')
+    assert.ok(display, 'the field is in the layout on sign in too')
+    assert.ok(display.className.includes('invisible'), 'but hidden and space-reserving')
+    assert.equal(display.tabIndex, -1, 'and out of the tab order')
   })
 
   test('needs a handle before a method runs', async () => {

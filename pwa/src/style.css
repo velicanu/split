@@ -486,6 +486,10 @@ input.pay-amt {
   gap: var(--space-md);
   margin-bottom: var(--space-md);
 }
+/* Kept in the layout (so nothing below it shifts) but not shown or reachable. */
+.invisible {
+  visibility: hidden;
+}
 .methods {
   display: flex;
   flex-direction: column;

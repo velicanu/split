@@ -142,13 +142,16 @@ export function Auth({ onAuth }) {
               autoComplete="username"
               autoFocus
             />
-            {page === 'signup' && (
-              <input
-                placeholder="display name (optional)"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-              />
-            )}
+            {/* Always in the layout so the method cards below don't shift between
+                sign in and sign up; only shown (and reachable) on sign up. */}
+            <input
+              className={page === 'signup' ? undefined : 'invisible'}
+              placeholder="display name (optional)"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              aria-hidden={page !== 'signup'}
+              tabIndex={page === 'signup' ? undefined : -1}
+            />
           </div>
 
           <div className="methods">
