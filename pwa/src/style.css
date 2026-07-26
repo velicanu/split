@@ -446,3 +446,49 @@ input.pay-amt {
   margin: var(--space-md) auto;
   border-radius: var(--radius);
 }
+
+/* Auth: a 3-way page nav (sign in / sign up / pair) with equally-prominent
+   method buttons below. See Auth.jsx, plan/16. */
+.segmented {
+  display: flex;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-lg);
+}
+.segmented button {
+  flex: 1;
+  padding: var(--space-md);
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+.segmented button.active {
+  /* The page you're on: shown grayed and inert rather than as a live choice. */
+  background: var(--surface);
+  color: var(--disabled);
+  cursor: default;
+}
+.methods {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.method {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.method button {
+  width: 100%;
+}
+.authnav {
+  text-align: center;
+  margin-top: var(--space-xl);
+}
+.authnav .current {
+  color: var(--disabled);
+}
