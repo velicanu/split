@@ -471,9 +471,11 @@ input.pay-amt {
   font-weight: 600;
 }
 .segmented button.active {
-  /* The page you're on: shown grayed and inert rather than as a live choice. */
-  background: var(--surface);
-  color: var(--disabled);
+  /* The page you're on: filled to read as selected, and inert. */
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  opacity: 1;
   cursor: default;
 }
 /* The shared handle (and display name) above the method cards — stretched to

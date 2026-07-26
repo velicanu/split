@@ -161,6 +161,11 @@ export function Auth({ onAuth }) {
                 >
                   {page === 'signin' ? 'Sign in with a passkey' : 'Sign up with a passkey'}
                 </button>
+                <span className="muted">
+                  {page === 'signin'
+                    ? 'Nothing to type — your device unlocks it.'
+                    : 'No password to set — your device holds the key.'}
+                </span>
               </div>
             )}
             <form className="method" onSubmit={page === 'signin' ? withPassword : signupPassword}>
