@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "libsodium-wrappers-sumo": "^0.8.4",
+    "qrcode": "^1.5.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

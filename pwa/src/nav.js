@@ -14,6 +14,11 @@ export function readView(hash = window.location.hash) {
   const h = hash.replace(/^#/, '')
   if (h === 'settings') return { view: 'settings' }
   if (h === 'new-bill') return { view: 'newbill' }
+  if (h === 'add-device') return { view: 'pairdevice' }
+  // A scanned pairing deep link (#pair=<code>) lands the signed-in device on the
+  // pairing screen with the code pre-filled. See plan/17.
+  const pair = h.match(/^pair=(.+)$/)
+  if (pair) return { view: 'pairdevice', code: decodeURIComponent(pair[1]) }
   const group = h.match(/^group\/(-?\d+)$/)
   if (group) return { view: 'group', id: Number(group[1]) }
   return { view: 'list' }
@@ -23,6 +28,7 @@ export function readView(hash = window.location.hash) {
 export function viewHash({ view, id }) {
   if (view === 'settings') return '#settings'
   if (view === 'newbill') return '#new-bill'
+  if (view === 'pairdevice') return '#add-device'
   if (view === 'group') return `#group/${id}`
   return ''
 }

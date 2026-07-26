@@ -7,6 +7,7 @@ import ai
 import auth
 import bills
 import groups
+import pairings
 import receipts
 from db import DB_PATH, SCHEMA_VERSION, init_db, reset_if_stale
 from groups import split_equally
@@ -23,7 +24,7 @@ __all__ = [
 
 app = FastAPI()
 init_db()
-for _module in (auth, groups, receipts, bills, ai):
+for _module in (auth, groups, receipts, bills, ai, pairings):
     app.include_router(_module.router)
 
 

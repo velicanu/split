@@ -69,21 +69,24 @@ export async function groupKey(groupId) {
     // Offline, and nothing stored here yet.
     return null
   }
-  const mine = keys.find((k) => k.recipient_kind === 'device')
-  if (!mine) return null
-  try {
-    const key = await openSealed(
-      device.box_pubkey,
-      device.box_privkey,
-      mine.ciphertext
-    )
-    cache.set(groupId, key)
-    await saveGroupKey(groupId, key)
-    return key
-  } catch {
-    // Sealed to a device key this browser no longer holds.
-    return null
+  // Several device wraps can come back — one per device on the account, once a
+  // second device is enrolled or paired. Only this device's opens, so try each
+  // rather than assuming the first is ours.
+  for (const w of keys.filter((k) => k.recipient_kind === 'device')) {
+    try {
+      const key = await openSealed(
+        device.box_pubkey,
+        device.box_privkey,
+        w.ciphertext
+      )
+      cache.set(groupId, key)
+      await saveGroupKey(groupId, key)
+      return key
+    } catch {
+      // Sealed to another device (or a key this browser no longer holds) — next.
+    }
   }
+  return null
 }
 
 export async function createGroupKey(groupId) {
@@ -123,6 +126,26 @@ export async function adoptGroupsForNewDevice(accountKey) {
     } catch {
       // One unreadable group must not stop the others being recovered.
     }
+  }
+}
+
+/** During pairing: the signed-in (old) device seals each group key it already
+ *  holds to a newly-paired device. No account key — the old device has the keys
+ *  unwrapped for daily use, which is what makes pairing A-free. See plan/17. */
+export async function sealGroupsToDevice(deviceId, boxPubkey) {
+  const groups = await api('groups')
+  for (const g of groups.groups ?? groups) {
+    const key = await groupKey(g.id)
+    if (!key) continue
+    await api(`groups/${g.id}/keys`, {
+      keys: [
+        {
+          recipient_kind: 'device',
+          recipient_id: deviceId,
+          ciphertext: await sealTo(boxPubkey, key),
+        },
+      ],
+    })
   }
 }
 

@@ -44,7 +44,7 @@ const maskKey = (key) => `…${String(key).slice(-4)}`
 
 // Provider settings. There is no default provider — with no keys the scanning
 // feature simply doesn't exist. Adding a key (or switching) makes it active.
-export function Settings({ ai, user, onChanged, onClose }) {
+export function Settings({ ai, user, onChanged, onPair, onClose }) {
   const [drafts, setDrafts] = useState({})
   const [error, setError] = useState('')
 
@@ -174,7 +174,7 @@ export function Settings({ ai, user, onChanged, onClose }) {
       <h2>Account</h2>
       <SignInMethods user={user} />
       <PasswordForm user={user} />
-      <Devices />
+      <Devices onPair={onPair} />
     </section>
   )
 }
@@ -431,7 +431,7 @@ function PasswordForm({ user }) {
 // Every device holds its own key, so revoking one is real rather than
 // advisory: it can't authenticate afterwards, and it can't enrol a
 // replacement because its own key is the only one it ever had.
-function Devices() {
+function Devices({ onPair }) {
   const [devices, setDevices] = useState(null)
   const [error, setError] = useState('')
 
@@ -459,6 +459,11 @@ function Devices() {
   return (
     <section>
       <h3>Devices</h3>
+      {onPair && (
+        <div className="row-actions">
+          <button onClick={onPair}>Pair a new device</button>
+        </div>
+      )}
       <p className="muted">
         Lost a device? Revoke it here and it loses access immediately, and
         drops off this list. It keeps anything it had already downloaded —

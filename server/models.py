@@ -1,6 +1,13 @@
 from pydantic import BaseModel
 
 
+class PairingIn(BaseModel):
+    # A new device advertising its *public* keys for an old device to sign.
+    new_pubkey: str
+    new_box_pubkey: str
+    label: str = "new device"
+
+
 class WrapIn(BaseModel):
     # A client-chosen id ('password', 'recovery', or a passkey's own id); the
     # method tells a fresh device how to satisfy it.

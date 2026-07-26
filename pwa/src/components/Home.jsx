@@ -13,6 +13,7 @@ import { Settings } from './Settings'
 import { GroupList } from './GroupList'
 import { GroupView } from './GroupView'
 import { BillCreate } from './BillCreate'
+import { PairOldDevice } from './PairOldDevice'
 
 export function Home({ user, onLogout }) {
   // The fragment at load: an invite to consume, or a view to restore. Captured
@@ -27,6 +28,7 @@ export function Home({ user, onLogout }) {
   const groupId = view.view === 'group' ? view.id : null
   const showSettings = view.view === 'settings'
   const showNewBill = view.view === 'newbill'
+  const showPair = view.view === 'pairdevice'
   // null until loaded; { active, providers } after. No key => no provider.
   const [ai, setAi] = useState(null)
 
@@ -103,8 +105,11 @@ export function Home({ user, onLogout }) {
           ai={ai}
           user={user}
           onChanged={loadAi}
+          onPair={() => navigate({ view: 'pairdevice' })}
           onClose={() => navigate({ view: 'list' })}
         />
+      ) : showPair ? (
+        <PairOldDevice code={view.code} onClose={() => navigate({ view: 'list' })} />
       ) : showNewBill ? (
         <BillCreate ai={ai} onBack={() => navigate({ view: 'list' })} />
       ) : groupId != null ? (

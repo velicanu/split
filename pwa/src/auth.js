@@ -35,7 +35,7 @@ import {
 } from './crypto'
 
 
-const deviceLabel = () => {
+export const deviceLabel = () => {
   const ua = navigator.userAgent || ''
   const os =
     /iPhone|iPad/.test(ua) ? 'iOS'
@@ -47,7 +47,7 @@ const deviceLabel = () => {
 }
 
 /** Prove possession of this device's key and get a session cookie. */
-async function authenticate(device) {
+export async function authenticate(device) {
   const { nonce } = await api('auth/challenge', { device_pubkey: device.pubkey })
   await api('auth/verify', {
     device_pubkey: device.pubkey,

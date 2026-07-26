@@ -39,7 +39,7 @@ def db():
 
 # Bump whenever the schema changes shape. See reset_if_stale below: while we
 # are still in development this triggers a wipe, not a migration.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def reset_if_stale(conn):
@@ -147,6 +147,20 @@ def init_db():
             " token TEXT PRIMARY KEY,"
             " user_id INTEGER NOT NULL REFERENCES users(id),"
             " device_id TEXT NOT NULL REFERENCES devices(id))"
+        )
+        # A short-lived rendezvous for pairing a new device from an already
+        # signed-in one (plan/17). It carries only the new device's *public*
+        # keys — nothing secret — from the new device to the old one, plus an
+        # `approved` flag the new device polls. The security is the fingerprint
+        # the two devices compare, not this row. Swept on access by expiry.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pairings ("
+            " code TEXT PRIMARY KEY,"
+            " new_pubkey TEXT NOT NULL,"
+            " new_box_pubkey TEXT NOT NULL,"
+            " label TEXT NOT NULL,"
+            " approved INTEGER NOT NULL DEFAULT 0,"
+            " expires_at REAL NOT NULL)"
         )
         conn.execute(
             # `read_token`, when set, is an opt-in read-only capability: anyone

@@ -18,10 +18,16 @@ import assert from 'node:assert/strict'
 import { after, describe, test } from 'node:test'
 
 import { enrolWithRecovery, signup } from '../src/auth.js'
-import { forgetDeviceKey } from '../src/store.js'
+import { forgetDeviceKey, forgetLocalLedger } from '../src/store.js'
 import { api } from '../src/api.js'
 import { encryptPayload } from '../src/crypto.js'
-import { createGroupKey, groupKey } from '../src/groupkeys.js'
+import { createGroupKey, forgetGroupKeys, groupKey } from '../src/groupkeys.js'
+import {
+  approvePairing,
+  completePairing,
+  fetchPairing,
+  startPairing,
+} from '../src/pairing.js'
 import { buildInviteLink, parseInvite } from '../src/invite.js'
 import {
   claimGhost,
@@ -236,6 +242,36 @@ describe('against a real server', { skip }, () => {
       () => enrolWithRecovery({ login_handle: h, code: '00000-00000-00000-00000-00000-00' }),
       /recovery code|decrypt/i
     )
+  })
+
+  test('pairing a new device: signed, group keys sealed to it, and it reads them', async () => {
+    // The whole point crosses several endpoints — add_device signed by a device,
+    // group-key sealing, and a second device reading its own wrap — which only a
+    // real server can vouch for.
+    const h = handle('pair')
+    await signup({ login_handle: h, display_name: 'Owner', password: 'live-test-password' })
+    const group = await api('groups', { name: 'Paired trip' })
+    const oldKey = await createGroupKey(group.id)
+
+    // New device advertises its keys.
+    const pending = await startPairing()
+    assert.equal(pending.fingerprint.split(' ').length, 6)
+
+    // Old device reads them, sees the same fingerprint, and approves.
+    const seen = await fetchPairing(pending.code)
+    assert.equal(seen.fingerprint, pending.fingerprint, 'both sides derive the same fingerprint')
+    await approvePairing(seen)
+
+    // The new device sees the approval and finishes.
+    assert.equal(await api(`pairings/${pending.code}`, undefined, 'GET').then((r) => r.approved), true)
+    const me = await completePairing(pending.device)
+    assert.equal(me.login_handle, h, 'the new device joined the same account')
+
+    // And — the payoff — it can read the group key the old device sealed to it,
+    // and it's the same key.
+    forgetGroupKeys()
+    await forgetLocalLedger()
+    assert.equal(await groupKey(group.id), oldKey, 'the sealed group key opens on the new device')
   })
 
   test('a shared bill: sealed create, account-less claim, folded split', async () => {
