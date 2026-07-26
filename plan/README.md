@@ -27,6 +27,7 @@ shared contract comes first because everything else conforms to it.
 | 14 | [Read-only sharing](14-read-only-sharing.md) | A link that lets anyone see a group without an account (an opt-in server read token gates the feed; the key rides in the fragment), and lets account-holders join — becoming a member or claiming a ghost. |
 | 15 | [Shared bill](15-shared-bill.md) | Split one receipt standalone: the creator scans and publishes a link; anyone opening it claims their items without an account (join a ghost or self-join, gated by a per-participant secret), and the split falls out via the group maths. |
 | 16 | [Sign-in methods](16-auth-methods.md) | A recovery code and a passkey (WebAuthn PRF) on top of the password — each just another wrap of the account key, so the server does no new verification. Multi-wrap `key_wraps`, a ≥1-wrap floor, and the weakest-wrap principle. Device pairing deferred. |
+| 17 | [Device pairing](17-device-pairing.md) | Add a device from one you're signed in on, `A`-free: a server rendezvous carries the new device's key to the old one, which signs it and seals the group keys. A short code (QR-carried) points at the rendezvous; an emoji fingerprint match is the security. |
 
 ## Cross-cutting principles
 
