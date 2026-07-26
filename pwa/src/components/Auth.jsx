@@ -5,13 +5,21 @@
 
 import { useState } from 'react'
 
-import { enrol, enrolWithPasskey, enrolWithRecovery, signup } from '../auth'
+import {
+  enrol,
+  enrolWithPasskey,
+  enrolWithRecovery,
+  signup,
+  signupWithPasskey,
+} from '../auth'
 import { passkeySupported } from '../webauthn'
 
 export function Auth({ onAuth }) {
   const [mode, setMode] = useState('signin')
   // On a fresh device you can sign in with the password or a recovery code.
   const [method, setMethod] = useState('password')
+  // Sign up secured by a passkey instead of a password.
+  const [signupPasskey, setSignupPasskey] = useState(false)
   const [handle, setHandle] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
@@ -29,12 +37,18 @@ export function Auth({ onAuth }) {
     setBusy(true)
     try {
       if (mode === 'signup') {
-        if (!password) return setError('Enter a password')
-        const { recoveryCode, ...me } = await signup({
+        const args = {
           login_handle: handle.trim(),
           display_name: displayName.trim() || handle.trim(),
-          password,
-        })
+        }
+        let result
+        if (signupPasskey) {
+          result = await signupWithPasskey(args)
+        } else {
+          if (!password) return setError('Enter a password')
+          result = await signup({ ...args, password })
+        }
+        const { recoveryCode, ...me } = result
         setRecovery({ code: recoveryCode, me })
       } else if (method === 'recovery') {
         if (!code.trim()) return setError('Enter your recovery code')
@@ -78,9 +92,9 @@ export function Auth({ onAuth }) {
       <main>
         <h1>Save your recovery code</h1>
         <p className="muted">
-          This is the one way back into your account if you forget your password
-          and lose your devices. Write it down or put it in a password manager —
-          we can&rsquo;t show it again, and nobody can reset it for you.
+          This is the one way back into your account if you lose your other
+          sign-in methods and your devices. Write it down or put it in a password
+          manager — we can&rsquo;t show it again, and nobody can reset it for you.
         </p>
         <input className="invite" readOnly value={recovery.code} onFocus={(e) => e.target.select()} />
         <div className="row-actions">
@@ -94,6 +108,7 @@ export function Auth({ onAuth }) {
   }
 
   const recoveryMode = mode === 'signin' && method === 'recovery'
+  const passkeySignup = mode === 'signup' && signupPasskey
 
   return (
     <main>
@@ -119,6 +134,10 @@ export function Auth({ onAuth }) {
             onChange={(e) => setCode(e.target.value)}
             autoComplete="off"
           />
+        ) : passkeySignup ? (
+          <p className="muted">
+            You&rsquo;ll create a passkey when you sign up — no password to set.
+          </p>
         ) : (
           <input
             type="password"
@@ -132,11 +151,28 @@ export function Auth({ onAuth }) {
           {busy
             ? 'working…'
             : mode === 'signup'
-              ? 'Sign up'
+              ? passkeySignup
+                ? 'Sign up with a passkey'
+                : 'Sign up'
               : 'Sign in on this device'}
         </button>
       </form>
       {error && <p className="error">{error}</p>}
+
+      {mode === 'signup' && passkeySupported() && (
+        <p className="muted">
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault()
+              setError('')
+              setSignupPasskey((v) => !v)
+            }}
+          >
+            {signupPasskey ? 'Use a password instead' : 'Sign up with a passkey instead'}
+          </a>
+        </p>
+      )}
 
       {mode === 'signin' && (
         <p className="muted">
@@ -178,6 +214,7 @@ export function Auth({ onAuth }) {
             e.preventDefault()
             setError('')
             setMethod('password')
+            setSignupPasskey(false)
             setMode(mode === 'signup' ? 'signin' : 'signup')
           }}
         >

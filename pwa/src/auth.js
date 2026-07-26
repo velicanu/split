@@ -56,13 +56,12 @@ async function authenticate(device) {
   })
 }
 
-export async function signup({ login_handle, display_name, password }) {
-  const account = await generateAccountKey()
-  const device = await generateDeviceKey()
-  // A recovery code is minted at signup and wrapped alongside the password, so
-  // every account has a strong way back in from the start — and one that isn't
-  // hostage to how good the password is. The caller shows it once; we never
-  // store the code itself, only the wrap it produced. See plan/16.
+// The shared tail of both signup paths. `primaryWrap` is how this account is
+// secured — a password or a passkey; a recovery code is always minted alongside
+// it, so every account has a strong way back in from the start, whichever the
+// primary is. The caller shows the code once; we never store it, only the wrap.
+// See plan/16.
+async function createAccount({ login_handle, display_name, account, device, primaryWrap }) {
   const recovery = generateRecoveryCode()
   await api('signup', {
     login_handle,
@@ -72,10 +71,7 @@ export async function signup({ login_handle, display_name, password }) {
     device_pubkey: device.pubkey,
     box_pubkey: device.box_pubkey,
     label: deviceLabel(),
-    wraps: [
-      await wrapAccountKey(account, password),
-      await wrapAccountKeyRecovery(account, recovery.entropy),
-    ],
+    wraps: [primaryWrap, await wrapAccountKeyRecovery(account, recovery.entropy)],
   })
   // Only stored once the server has accepted it, so a failed signup doesn't
   // leave a key behind that matches no account.
@@ -88,6 +84,42 @@ export async function signup({ login_handle, display_name, password }) {
   const me = await api('me')
   await saveSession(me)
   return { ...me, recoveryCode: recovery.code }
+}
+
+/** Sign up secured by a password (plus the recovery code). */
+export async function signup({ login_handle, display_name, password }) {
+  const account = await generateAccountKey()
+  const device = await generateDeviceKey()
+  return createAccount({
+    login_handle,
+    display_name,
+    account,
+    device,
+    primaryWrap: await wrapAccountKey(account, password),
+  })
+}
+
+/** Sign up secured by a passkey (plus the recovery code) — no password. The
+ *  passkey ceremony runs first, so if it's cancelled or the provider has no PRF,
+ *  no account is created and the caller can fall back to a password. */
+export async function signupWithPasskey({ login_handle, display_name }) {
+  const account = await generateAccountKey()
+  const device = await generateDeviceKey()
+  const { credentialId, prfBytes, label } = await createPasskey({
+    userId: login_handle,
+    userName: login_handle,
+  })
+  return createAccount({
+    login_handle,
+    display_name,
+    account,
+    device,
+    primaryWrap: await wrapAccountKeyPasskey(account, prfBytes, {
+      id: `passkey:${credentialId}`,
+      credentialId,
+      label,
+    }),
+  })
 }
 
 /** This device already holds a key. Nothing to type. */
