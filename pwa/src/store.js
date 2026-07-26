@@ -20,11 +20,32 @@
 // IndexedDB is evictable (iOS especially), so this is a cache and an outbox,
 // never the record. The server plus key recovery remain the durable copy.
 
+import { keyval } from './idb'
+
 const DB = 'split-ledger'
 const EVENTS = 'events'
 const META = 'meta'
 const OUTBOX = 'outbox'
 const GKEYS = 'gkeys'
+
+// The device key and the last-seen identity, in their own tiny key/value
+// database. Persistence lives here rather than in crypto.js, which is the pure
+// sealing/key-generation layer. Kept a separate database from the ledger so
+// clearing the ledger (forgetLocalLedger, on a rejected device) doesn't touch
+// the device key, and vice versa.
+const keys = keyval('split-keys', 'keys')
+
+export const loadDeviceKey = () => keys.get('device')
+export const saveDeviceKey = (key) => keys.put('device', key)
+export const forgetDeviceKey = () => keys.delete('device')
+
+// The last `me` this device saw, so an offline refresh has an identity to open
+// with rather than bouncing to the sign-in screen. Only who-you-are — id,
+// handle, display name — never key material. Cleared on logout with everything
+// else.
+export const loadSession = () => keys.get('session')
+export const saveSession = (me) => keys.put('session', me)
+export const forgetSession = () => keys.delete('session')
 
 function open() {
   return new Promise((resolve, reject) => {

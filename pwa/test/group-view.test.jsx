@@ -14,11 +14,10 @@ import {
   generateAccountKey,
   generateDeviceKey,
   generateGroupKey,
-  saveDeviceKey,
   sealTo,
 } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
-import { forgetLocalLedger } from '../src/store.js'
+import { forgetLocalLedger, saveDeviceKey } from '../src/store.js'
 import { forgetReceipts } from '../src/receipts.js'
 import {
   $,

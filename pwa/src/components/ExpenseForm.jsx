@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { PROVIDERS, extractReceipt } from '../ai'
-import { receiptWeights, splitByWeights, splitEqually } from '../ledger'
+import { resolvePayers, resolveSplit } from '../split'
 import { receiptBlob, uploadReceipt } from '../receipts'
 import { applyOption, splitOptions } from '../copysplit'
 import { dollars, memberIdFor, money, toCents } from '../format'
@@ -302,100 +302,21 @@ export function ExpenseForm({
     }
     if (!date) return setError('Pick a date')
 
-    // Resolve the chosen mode down to frozen per-person cents. Whatever the
-    // mode, the stored `splits` are what balances use; `split` keeps the recipe.
-    let splits
-    let split
-    if (mode === 'equal') {
-      const participants = members
-        .map((m) => m.id)
-        .filter((id) => !excluded.includes(id))
-      if (!participants.length) {
-        return setError('Pick at least one person to split between')
-      }
-      const shares = splitEqually(cents, participants)
-      splits = participants.map((uid) => ({
-        user_id: uid,
-        share_cents: shares[uid],
-      }))
-      split = { mode: 'equal' }
-    } else if (mode === 'items') {
-      const participants = members
-        .map((m) => m.id)
-        .filter((id) => !excluded.includes(id))
-      if (!participants.length) return setError('Pick who is on the receipt')
-      const parsed = items
-        .map((it) => ({
-          id: it.id,
-          name: it.name.trim(),
-          price_cents: Math.round(parseFloat(it.price) * 100) || 0,
-          claimed_by: it.claimed_by.filter((id) => participants.includes(id)),
-        }))
-        .filter((it) => it.price_cents > 0)
-      if (!parsed.length) return setError('Add at least one item with a price')
-      const w = receiptWeights(parsed, participants)
-      const positive = {}
-      for (const [id, v] of Object.entries(w)) if (v > 0) positive[id] = v
-      const shares = splitByWeights(cents, positive)
-      splits = Object.keys(shares)
-        .map(Number)
-        .sort((a, b) => a - b)
-        .map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
-      // Subtotal isn't stored — it's just the sum of the items.
-      split = {
-        mode: 'items',
-        participants,
-        items: parsed,
-        tax_cents: toCents(tax),
-        tip_cents: toCents(tip),
-      }
-    } else {
-      const w = {}
-      for (const m of members) {
-        const v = parseFloat(weights[m.id])
-        if (v > 0) w[m.id] = v
-      }
-      const ids = Object.keys(w)
-      if (!ids.length) {
-        return setError(
-          mode === 'percentage'
-            ? 'Enter a percentage for at least one person'
-            : 'Enter shares for at least one person'
-        )
-      }
-      if (mode === 'percentage') {
-        const sum = ids.reduce((t, id) => t + w[id], 0)
-        if (Math.abs(sum - 100) > 0.001) {
-          return setError(`Percentages must total 100 (now ${sum})`)
-        }
-      }
-      const shares = splitByWeights(cents, w)
-      splits = Object.keys(shares)
-        .map(Number)
-        .sort((a, b) => a - b)
-        .map((uid) => ({ user_id: uid, share_cents: shares[uid] }))
-      split = { mode, weights: w }
-    }
+    // The mode → frozen per-person cents mapping, and the who-paid resolution,
+    // are pure and live in split.js. The component only wires state in and shows
+    // any error back.
+    const resolved = resolveSplit(mode, cents, {
+      members,
+      excluded,
+      items,
+      weights,
+      taxCents: toCents(tax),
+      tipCents: toCents(tip),
+    })
+    if (resolved.error) return setError(resolved.error)
 
-    if (!payerIds.length) return setError('Pick who paid')
-    let payers
-    if (payerIds.length === 1) {
-      payers = [{ user_id: payerIds[0], paid_cents: cents }]
-    } else {
-      payers = payerIds.map((uid) => ({
-        user_id: uid,
-        paid_cents: Math.round(parseFloat(payerAmounts[uid]) * 100) || 0,
-      }))
-      if (payers.some((p) => p.paid_cents <= 0)) {
-        return setError('Each payer must have paid a positive amount')
-      }
-      const sum = payers.reduce((t, p) => t + p.paid_cents, 0)
-      if (sum !== cents) {
-        return setError(
-          `Payments must add up to ${money(cents)} (now ${money(sum)})`
-        )
-      }
-    }
+    const paid = resolvePayers(payerIds, payerAmounts, cents)
+    if (paid.error) return setError(paid.error)
 
     try {
       await onSubmit(
@@ -403,9 +324,9 @@ export function ExpenseForm({
           expense_id: initial?.expense_id ?? crypto.randomUUID(),
           description: description.trim(),
           amount_cents: cents,
-          payers,
-          splits,
-          split,
+          payers: paid.payers,
+          splits: resolved.splits,
+          split: resolved.split,
           date,
           category: category.trim(),
           receipts,

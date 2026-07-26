@@ -23,18 +23,18 @@ import {
   unlockWithPassword,
 } from '../src/auth.js'
 import {
+  forgetDeviceKey,
   forgetLocalLedger,
+  forgetSession,
+  loadDeviceKey,
+  loadSession,
   localEvents,
   localGroupKey,
+  saveDeviceKey,
   saveGroupKey,
 } from '../src/store.js'
 import { append } from '../src/sync.js'
 import {
-  forgetDeviceKey,
-  forgetSession,
-  loadDeviceKey,
-  loadSession,
-  saveDeviceKey,
   unwrapAccountKey,
   unwrapAccountKeyRecovery,
   wrapAccountKey,

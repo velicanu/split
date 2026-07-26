@@ -9,6 +9,12 @@
 // ceremony is kept thin and the wrap/unwrap around it is what the tests cover,
 // with navigator.credentials stubbed.
 
+import {
+  base64ToBytes as fromB64,
+  bytesToBase64 as toB64,
+  bytesToBase64url as toB64url,
+} from './bytes'
+
 const RP_NAME = 'Split'
 const rpId = () => window.location.hostname
 
@@ -22,14 +28,6 @@ const rand = (n) => {
   crypto.getRandomValues(a)
   return a
 }
-const toB64 = (bytes) => {
-  let s = ''
-  for (const b of bytes) s += String.fromCharCode(b)
-  return btoa(s)
-}
-const fromB64 = (t) => Uint8Array.from(atob(t), (c) => c.charCodeAt(0))
-const toB64url = (bytes) =>
-  toB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 
 /** Whether this browser can do WebAuthn at all. PRF specifically can't be known
  *  until we try, so creation still has to handle its absence. */

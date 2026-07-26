@@ -18,7 +18,7 @@ import assert from 'node:assert/strict'
 import { after, describe, test } from 'node:test'
 
 import { enrolWithRecovery, signup } from '../src/auth.js'
-import { forgetDeviceKey } from '../src/crypto.js'
+import { forgetDeviceKey } from '../src/store.js'
 import { api } from '../src/api.js'
 import { encryptPayload } from '../src/crypto.js'
 import { createGroupKey, groupKey } from '../src/groupkeys.js'

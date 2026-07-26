@@ -3,15 +3,9 @@
 import assert from 'node:assert/strict'
 import { afterEach, describe, test } from 'node:test'
 
-import {
-  contentId,
-  generateDeviceKey,
-  generateGroupKey,
-  saveDeviceKey,
-  sealTo,
-} from './crypto.js'
+import { contentId, generateDeviceKey, generateGroupKey, sealTo } from './crypto.js'
 import { forgetGroupKeys } from './groupkeys.js'
-import { forgetLocalLedger } from './store.js'
+import { forgetLocalLedger, saveDeviceKey } from './store.js'
 import { fetchReceipt, forgetReceipts, uploadReceipt } from './receipts.js'
 
 // What the canvas stub in test/setup.mjs produces: base64 'QUFB' -> 'AAA'.
@@ -151,7 +145,7 @@ describe('a share-link viewer reading a receipt', () => {
 
     // Forget the device/group key entirely — the viewer never had one.
     forgetGroupKeys()
-    await import('./crypto.js').then((m) => m.forgetDeviceKey())
+    await import('./store.js').then((m) => m.forgetDeviceKey())
 
     const bytes = await fetchReceipt(7, id, { key: store.key, readToken: 'rt-secret' })
     assert.deepEqual([...bytes], PLAINTEXT, 'decrypted with the link key')
