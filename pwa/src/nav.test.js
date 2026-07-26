@@ -12,7 +12,12 @@ describe('reading a view from the fragment', () => {
   test('settings, a group, and the bill form each name themselves', () => {
     assert.deepEqual(readView('#settings'), { view: 'settings' })
     assert.deepEqual(readView('#new-bill'), { view: 'newbill' })
+    assert.deepEqual(readView('#add-device'), { view: 'pairdevice' })
     assert.deepEqual(readView('#group/7'), { view: 'group', id: 7 })
+  })
+
+  test('a scanned pairing deep link carries the code', () => {
+    assert.deepEqual(readView('#pair=AbC-123'), { view: 'pairdevice', code: 'AbC-123' })
   })
 
   test('the id comes back a number, since member ids are numbers', () => {
@@ -43,6 +48,7 @@ describe('writing a view to a fragment', () => {
       { view: 'list' },
       { view: 'settings' },
       { view: 'newbill' },
+      { view: 'pairdevice' },
       { view: 'group', id: 7 },
       { view: 'group', id: -42 },
     ]) {

@@ -13,9 +13,12 @@ import {
   signupWithPasskey,
 } from '../auth'
 import { passkeySupported } from '../webauthn'
+import { PairNewDevice } from './PairNewDevice'
 
 export function Auth({ onAuth }) {
   const [mode, setMode] = useState('signin')
+  // Pairing this device from one already signed in (plan/17).
+  const [pairing, setPairing] = useState(false)
   // On a fresh device you can sign in with the password or a recovery code.
   const [method, setMethod] = useState('password')
   // Sign up secured by a passkey instead of a password.
@@ -105,6 +108,10 @@ export function Auth({ onAuth }) {
         </div>
       </main>
     )
+  }
+
+  if (pairing) {
+    return <PairNewDevice onPaired={onAuth} onCancel={() => setPairing(false)} />
   }
 
   const recoveryMode = mode === 'signin' && method === 'recovery'
@@ -221,6 +228,21 @@ export function Auth({ onAuth }) {
           {mode === 'signup' ? 'Sign in' : 'Sign up'}
         </a>
       </p>
+      {mode === 'signin' && (
+        <p className="muted">
+          Already signed in on another device?{' '}
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault()
+              setError('')
+              setPairing(true)
+            }}
+          >
+            Pair this device
+          </a>
+        </p>
+      )}
     </main>
   )
 }

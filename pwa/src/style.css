@@ -428,3 +428,21 @@ input.pay-amt {
   word-break: break-word;
   overflow-x: auto;
 }
+
+/* Device pairing (plan/17): the fingerprint to compare, the code, the QR. */
+.fingerprint {
+  font-size: 2rem;
+  letter-spacing: 0.35rem;
+  text-align: center;
+  margin: var(--space-md) 0;
+}
+.pair-code {
+  font-family: ui-monospace, monospace;
+  font-size: 1.4rem;
+  letter-spacing: 0.15rem;
+}
+.qr {
+  display: block;
+  margin: var(--space-md) auto;
+  border-radius: var(--radius);
+}
