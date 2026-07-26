@@ -125,29 +125,6 @@ export function Auth({ onAuth }) {
       ))}
     </div>
   )
-  const links = (
-    <p className="authnav muted">
-      {PAGES.map(([id, label], i) => (
-        <span key={id}>
-          {i > 0 && ' · '}
-          {page === id ? (
-            <span className="current">{label}</span>
-          ) : (
-            <a
-              href="#"
-              onClick={(e) => {
-                e.preventDefault()
-                go(id)
-              }}
-            >
-              {label}
-            </a>
-          )}
-        </span>
-      ))}
-    </p>
-  )
-
   return (
     <main>
       <h1>Split</h1>
@@ -157,19 +134,22 @@ export function Auth({ onAuth }) {
         <PairNewDevice onPaired={onAuth} onCancel={() => go('signin')} />
       ) : (
         <>
-          <input
-            placeholder="handle"
-            value={handle}
-            onChange={(e) => setHandle(e.target.value)}
-            autoComplete="username"
-          />
-          {page === 'signup' && (
+          <div className="fields">
             <input
-              placeholder="display name (optional)"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="handle"
+              value={handle}
+              onChange={(e) => setHandle(e.target.value)}
+              autoComplete="username"
+              autoFocus
             />
-          )}
+            {page === 'signup' && (
+              <input
+                placeholder="display name (optional)"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            )}
+          </div>
 
           <div className="methods">
             {passkeySupported() && (
@@ -181,6 +161,11 @@ export function Auth({ onAuth }) {
                 >
                   {page === 'signin' ? 'Sign in with a passkey' : 'Sign up with a passkey'}
                 </button>
+                <span className="muted">
+                  {page === 'signin'
+                    ? 'Nothing to type — your device unlocks it.'
+                    : 'No password to set — your device holds the key.'}
+                </span>
               </div>
             )}
             <form className="method" onSubmit={page === 'signin' ? withPassword : signupPassword}>
@@ -221,7 +206,6 @@ export function Auth({ onAuth }) {
         Your secrets never leave this device — they unlock your keys here, so
         nobody can reset them for you.
       </p>
-      {links}
     </main>
   )
 }

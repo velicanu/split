@@ -65,12 +65,18 @@
 body {
   font-family: system-ui, sans-serif;
   margin: 0;
-  display: flex;
-  min-height: 100vh;
-  align-items: center;
-  justify-content: center;
   background: var(--bg);
   color: var(--fg);
+}
+
+/* The React mount fills the viewport and top-aligns its screen, horizontally
+   centred. Screens anchor to the top rather than the middle so the auth title
+   and tabs stay put as pages change height. */
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 main {
@@ -85,12 +91,14 @@ form {
   width: 100%;
 }
 
-/* The sign-in screen centres a narrow form; every form inside the app is
-   full-width like the cards it sits among. Scoped, so the auth width no longer
-   leaks into the group and settings forms. */
-main:not(.app) form {
-  width: 240px;
-  margin: 0 auto;
+/* The auth screen (sign in / sign up / pair). Anchored near the top rather than
+   vertically centred, so the title and the page tabs stay put as you flip
+   between pages of different heights instead of jumping. A comfortable max
+   width, and its forms are full-width like the method cards they sit among. */
+main:not(.app) {
+  width: 100%;
+  max-width: 460px;
+  margin-top: 8vh;
 }
 
 input {
@@ -118,7 +126,6 @@ main.app {
   text-align: left;
   width: 100%;
   max-width: 440px;
-  align-self: flex-start;
   padding: var(--space-xl);
 }
 
@@ -464,10 +471,20 @@ input.pay-amt {
   font-weight: 600;
 }
 .segmented button.active {
-  /* The page you're on: shown grayed and inert rather than as a live choice. */
-  background: var(--surface);
-  color: var(--disabled);
+  /* The page you're on: filled to read as selected, and inert. */
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  opacity: 1;
   cursor: default;
+}
+/* The shared handle (and display name) above the method cards — stretched to
+   the same width as the cards rather than sized to content. */
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-bottom: var(--space-md);
 }
 .methods {
   display: flex;
@@ -484,11 +501,4 @@ input.pay-amt {
 }
 .method button {
   width: 100%;
-}
-.authnav {
-  text-align: center;
-  margin-top: var(--space-xl);
-}
-.authnav .current {
-  color: var(--disabled);
 }

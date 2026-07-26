@@ -26,14 +26,11 @@ describe('the auth front door', () => {
     assert.ok(methods.includes('Sign in with recovery code'))
   })
 
-  test('the current page is grayed in both the tabs and the bottom links', async () => {
+  test('the current page tab is grayed and inert; the others navigate', async () => {
     await mount(<Auth onAuth={() => {}} />)
     assert.ok(tab('Sign in').disabled, 'the current tab is inert')
-    // The bottom link row renders the current page as a plain span, others links.
-    const current = $('.authnav .current')
-    assert.equal(current.textContent, 'Sign in')
-    assert.equal(byText('.authnav a', 'Sign in'), undefined, 'current page is not a link')
-    assert.ok(byText('.authnav a', 'Pair'), 'the others are links')
+    assert.ok(tab('Sign in').className.includes('active'), 'and marked active/grayed')
+    assert.ok(!tab('Sign up').disabled, 'the others are live')
   })
 
   test('sign up drops recovery and adds a display name', async () => {
