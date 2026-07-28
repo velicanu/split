@@ -131,11 +131,12 @@ Cross-cutting `Sheet` component; adopt where the mockup uses one.
 
 ## Open decisions
 
-1. **Dark by default?** The mockup is dark-only and clearly designed for it (the
-   glass reads best over the dark ambient field). We kept light + the toggle.
-   Options: (a) keep system-preference default as today; (b) default new users to
-   dark, toggle still available; (c) go dark-only and drop the light palette.
-   Recommend (b) unless we want to shed the light-mode maintenance.
+1. **Dark by default?** *Settled: keep the existing three-way toggle —* **System
+   default** *(follows `prefers-color-scheme`), Light, or Dark.* No dark-by-
+   default, no dropping the light palette. This is already the shipped model
+   (`theme.js` `THEMES = ['system','light','dark']`, `system` stored as absence
+   so a later OS change is followed; the `ThemeToggle` in `Settings.jsx` exposes
+   all three). Nothing to build.
 2. **Group emoji storage** (phase C) — a field on the encrypted group metadata.
    Confirm where group metadata is sealed today and add one optional key; the
    server never sees it.
