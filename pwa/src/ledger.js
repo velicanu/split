@@ -247,6 +247,10 @@ export function computeState(events) {
       // Soft delete: the row stays in the log with its data intact so it can
       // be shown struck-through and restored; it just stops counting.
       deleted: !!p.deleted,
+      // Who filed this revision (server-set on the event). Purely for display —
+      // the activity feed's "X added …" — and never touches the money. Resolved
+      // so a claimed-away author still reads as the account that claimed them.
+      author: e.author == null ? null : resolve(e.author),
     }
   })
 
@@ -319,6 +323,7 @@ export function computeState(events) {
     .map((x) => ({
       ...x,
       payer_names: x.payers.map((p) => nameById[p.user_id] || '?'),
+      author_name: x.author == null ? null : nameById[x.author] || null,
       ways: x.splits.length,
       comments: commentsByExpense[x.expense_id] || [],
     }))

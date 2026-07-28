@@ -23,12 +23,16 @@ import { ExpenseForm } from './ExpenseForm'
 import { InviteLink, ShareReadOnly } from './sharing'
 import { LedgerLog } from './LedgerLog'
 import { Payments, SettleUp } from './settle'
+import { Sheet } from './Sheet'
 
 export function GroupView({ groupId, me, ai, onBack, onOpen }) {
   const [meta, setMeta] = useState(null)
   const [events, setEvents] = useState([])
   const [version, setVersion] = useState(0)
-  const [editing, setEditing] = useState(null) // null = add mode; else an expense
+  const [editing, setEditing] = useState(null) // the expense being edited, or null
+  const [adding, setAdding] = useState(false) // the add-expense sheet is open
+  const [tab, setTab] = useState('expenses') // expenses | balances
+  const [menuOpen, setMenuOpen] = useState(false) // the ⋮ group menu sheet
   const [viewingId, setViewingId] = useState(null) // expense_id shown in detail
   // Bumped to remount (and so reset) the add-expense form after a create.
   const [formNonce, setFormNonce] = useState(0)
@@ -99,6 +103,9 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
     setEvents([])
     setVersion(0)
     setEditing(null)
+    setAdding(false)
+    setMenuOpen(false)
+    setTab('expenses')
     setViewingId(null)
     setUnreadable(0)
     // Local first, and without waiting for anything: with no signal this is
@@ -164,6 +171,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
   async function submitExpense(payload, isEdit) {
     await appendEvent(isEdit ? 'expense.updated' : 'expense.created', payload)
     setEditing(null)
+    setAdding(false)
     setScanReceipt(null)
     // Leaving an edit already remounts the form (the key changes back), but
     // creating doesn't — so the draft, receipts and all, would otherwise sit
@@ -396,35 +404,29 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
     )
   }
 
+  const closeForm = () => {
+    setEditing(null)
+    setAdding(false)
+    setScanReceipt(null)
+  }
+  const formOpen = adding || editing != null
+
   return (
-    <section>
-      <button className="link" onClick={onBack}>
-        ← groups
-      </button>
-      <h2>{meta.name}</h2>
-      <p className="muted">
-        synced v{version} ·{' '}
-        <button className="link" onClick={() => setShowLog(true)}>
-          log
+    <section className="group">
+      <div className="topbar">
+        <button className="iconbtn" onClick={onBack} aria-label="Back to groups">
+          ←
         </button>
-      </p>
-      <InviteLink
-        groupId={groupId}
-        code={meta.code}
-        members={state.members}
-        onAddGhost={addGhost}
-      />
-      <ShareReadOnly groupId={groupId} code={meta.code} />
-      {showLog && (
-        <LedgerLog
-          group={{ id: groupId, name: meta.name }}
-          version={version}
-          events={events}
-          unreadable={unreadable}
-          members={state.members}
-          onClose={() => setShowLog(false)}
-        />
-      )}
+        <h2 className="headline">{meta.name}</h2>
+        <button
+          className="iconbtn"
+          onClick={() => setMenuOpen(true)}
+          aria-label="Group menu"
+        >
+          ⋮
+        </button>
+      </div>
+
       {(!online || pendingWrites > 0) && (
         <p className="muted sync-state">
           {pendingWrites > 0
@@ -439,102 +441,175 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
         </p>
       )}
 
-      <h3>Balances</h3>
-      <ul className="list">
-        {state.balances.map((b) => (
-          <li key={b.user_id} className="row static">
-            <span>{b.display_name}</span>
-            <span className={b.net_cents >= 0 ? 'pos' : 'neg'}>
-              {b.net_cents === 0
-                ? 'settled up'
-                : b.net_cents > 0
-                  ? `is owed ${money(b.net_cents)}`
-                  : `owes ${money(-b.net_cents)}`}
-            </span>
-          </li>
-        ))}
-      </ul>
+      <div className="segmented">
+        <button
+          className={tab === 'expenses' ? 'active' : ''}
+          disabled={tab === 'expenses'}
+          onClick={() => setTab('expenses')}
+        >
+          Expenses
+        </button>
+        <button
+          className={tab === 'balances' ? 'active' : ''}
+          disabled={tab === 'balances'}
+          onClick={() => setTab('balances')}
+        >
+          Balances
+        </button>
+      </div>
 
-      <h3>Settle up</h3>
-      <SettleUp suggestions={suggestions} onRecord={recordSettlement} />
+      {tab === 'expenses' ? (
+        <>
+          {state.ledger.length === 0 && (
+            <p className="muted">No expenses yet — tap + to add one.</p>
+          )}
+          <ul className="list">
+            {state.ledger.map((x) => (
+              <li
+                key={x.expense_id}
+                className={`row static${x.deleted ? ' deleted' : ''}`}
+              >
+                <div
+                  className="expense clickable"
+                  onClick={() => setViewingId(x.expense_id)}
+                >
+                  <span>
+                    {x.description}
+                    {x.deleted ? ' (deleted)' : ''}
+                  </span>
+                  <span className="muted">
+                    {x.payer_names.join(', ')} paid {money(x.amount_cents)} ·
+                    split {x.ways} way{x.ways === 1 ? '' : 's'}
+                    {x.date ? ` · ${x.date}` : ''}
+                    {x.category ? ` · ${x.category}` : ''}
+                    {x.comments.length > 0 ? ` · 💬 ${x.comments.length}` : ''}
+                  </span>
+                </div>
+                <div className="row-actions">
+                  <button
+                    className="link"
+                    onClick={() => setEditing(x)}
+                    disabled={x.deleted}
+                  >
+                    edit
+                  </button>
+                  {x.deleted ? (
+                    <button className="link" onClick={() => setDeleted(x, false)}>
+                      restore
+                    </button>
+                  ) : (
+                    <button
+                      className="link danger"
+                      onClick={() => setDeleted(x, true)}
+                    >
+                      delete
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <>
+          <h3 className="section-title">Net balances</h3>
+          <ul className="list">
+            {state.balances.map((b) => (
+              <li key={b.user_id} className="row static">
+                <span>{b.display_name}</span>
+                <span className={b.net_cents >= 0 ? 'pos' : 'neg'}>
+                  {b.net_cents === 0
+                    ? 'settled up'
+                    : b.net_cents > 0
+                      ? `is owed ${money(b.net_cents)}`
+                      : `owes ${money(-b.net_cents)}`}
+                </span>
+              </li>
+            ))}
+          </ul>
 
-      <AddGhost onAdd={addGhost} />
-      <LeaveOrGhost members={state.members} meId={meId} onGhost={ghostMember} />
+          <h3 className="section-title">Suggested settle-ups</h3>
+          <SettleUp suggestions={suggestions} onRecord={recordSettlement} />
 
-      {state.members.length > 0 && (
-        <ExpenseForm
-          key={editing?.expense_id || `new-${formNonce}`}
-          groupId={groupId}
-          members={state.members}
-          me={me}
-          ai={ai}
-          initial={editing}
-          savedSplits={savedSplits}
-          scanOnOpen={scanReceipt}
-          onSubmit={submitExpense}
-          onCancel={() => {
-            setEditing(null)
-            setScanReceipt(null)
-          }}
-        />
+          <h3 className="section-title">Payments</h3>
+          <Payments
+            payments={state.payments}
+            onEdit={editSettlement}
+            onDelete={deleteSettlement}
+          />
+        </>
       )}
 
-      <h3>Ledger</h3>
-      {state.ledger.length === 0 && <p className="muted">No expenses yet.</p>}
-      <ul className="list">
-        {state.ledger.map((x) => (
-          <li
-            key={x.expense_id}
-            className={`row static${x.deleted ? ' deleted' : ''}`}
-          >
-            <div
-              className="expense clickable"
-              onClick={() => setViewingId(x.expense_id)}
-            >
-              <span>
-                {x.description}
-                {x.deleted ? ' (deleted)' : ''}
-              </span>
-              <span className="muted">
-                {x.payer_names.join(', ')} paid {money(x.amount_cents)} · split{' '}
-                {x.ways} way{x.ways === 1 ? '' : 's'}
-                {x.date ? ` · ${x.date}` : ''}
-                {x.category ? ` · ${x.category}` : ''}
-                {x.comments.length > 0 ? ` · 💬 ${x.comments.length}` : ''}
-              </span>
-            </div>
-            <div className="row-actions">
-              <button
-                className="link"
-                onClick={() => setEditing(x)}
-                disabled={x.deleted}
-              >
-                edit
-              </button>
-              {x.deleted ? (
-                <button className="link" onClick={() => setDeleted(x, false)}>
-                  restore
-                </button>
-              ) : (
-                <button
-                  className="link danger"
-                  onClick={() => setDeleted(x, true)}
-                >
-                  delete
-                </button>
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
-
-      <h3>Payments</h3>
-      <Payments
-        payments={state.payments}
-        onEdit={editSettlement}
-        onDelete={deleteSettlement}
-      />
       {error && <p className="error">{error}</p>}
+
+      {state.members.length > 0 && tab === 'expenses' && !formOpen && (
+        <button
+          className="fab"
+          onClick={() => {
+            setEditing(null)
+            setAdding(true)
+          }}
+          aria-label="Add expense"
+        >
+          ＋
+        </button>
+      )}
+
+      {formOpen && state.members.length > 0 && (
+        <Sheet onClose={closeForm}>
+          {/* ExpenseForm carries its own "Add an expense" / "Edit expense"
+              heading, so the sheet doesn't add a second one. */}
+          <ExpenseForm
+            key={editing?.expense_id || `new-${formNonce}`}
+            groupId={groupId}
+            members={state.members}
+            me={me}
+            ai={ai}
+            initial={editing}
+            savedSplits={savedSplits}
+            scanOnOpen={scanReceipt}
+            onSubmit={submitExpense}
+            onCancel={closeForm}
+          />
+        </Sheet>
+      )}
+
+      {menuOpen && (
+        <Sheet title={meta.name} onClose={() => setMenuOpen(false)}>
+          <p className="muted">
+            synced v{version} ·{' '}
+            <button
+              className="link"
+              onClick={() => {
+                setMenuOpen(false)
+                setShowLog(true)
+              }}
+            >
+              view log
+            </button>
+          </p>
+          <InviteLink
+            groupId={groupId}
+            code={meta.code}
+            members={state.members}
+            onAddGhost={addGhost}
+          />
+          <ShareReadOnly groupId={groupId} code={meta.code} />
+          <AddGhost onAdd={addGhost} />
+          <LeaveOrGhost members={state.members} meId={meId} onGhost={ghostMember} />
+        </Sheet>
+      )}
+
+      {showLog && (
+        <LedgerLog
+          group={{ id: groupId, name: meta.name }}
+          version={version}
+          events={events}
+          unreadable={unreadable}
+          members={state.members}
+          onClose={() => setShowLog(false)}
+        />
+      )}
 
       {viewing && (
         <ExpenseDetail

@@ -233,6 +233,34 @@ describe('computeState expenses', () => {
     assert.equal(netOf(state, 2), -500)
   })
 
+  test('surfaces the author (for the activity feed) without touching balances', () => {
+    // author is the 3rd arg to ev(); resolved to a name via the members.
+    const created = ev(
+      'expense.created',
+      {
+        expense_id: 'e1',
+        description: 'thing',
+        amount_cents: 1000,
+        payers: [{ user_id: 1, paid_cents: 1000 }],
+        splits: [
+          { user_id: 1, share_cents: 500 },
+          { user_id: 2, share_cents: 500 },
+        ],
+        date: '2026-01-01',
+      },
+      2
+    )
+    const state = computeState([member(1, 'v'), member(2, 'd'), created])
+    const row = state.ledger.find((x) => x.expense_id === 'e1')
+    assert.equal(row.author, 2)
+    assert.equal(row.author_name, 'd')
+    // An authorless (locally-written, not yet synced) expense is fine too.
+    const anon = computeState([member(1, 'v'), member(2, 'd'), expense('e2')])
+    const anonRow = anon.ledger.find((x) => x.expense_id === 'e2')
+    assert.equal(anonRow.author, null)
+    assert.equal(anonRow.author_name, null)
+  })
+
   test('balances always sum to zero', () => {
     const state = computeState([
       member(1, 'v'),

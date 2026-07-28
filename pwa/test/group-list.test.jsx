@@ -23,7 +23,9 @@ function server(groups) {
   return { goOffline: () => (online = false) }
 }
 
-const rows = () => $$('.list .row').map((b) => b.textContent)
+// A row now leads with a glyph and trails with my balance; the name + member
+// count live in the middle. That middle is what these assert on.
+const rows = () => $$('.list .gitem-main').map((b) => b.textContent)
 
 afterEach(async () => {
   await forgetLocalLedger()

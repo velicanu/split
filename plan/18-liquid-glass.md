@@ -76,6 +76,37 @@ Deviations from the mockup, on purpose:
 | **Add-expense sheet** w/ split modes | `ExpenseForm.jsx` | Bottom-sheet presentation + **Exact / % / Shares** chips (only Equal today). |
 | Pairing-approval sheet (emoji SAS) | `PairOldDevice.jsx` fingerprint | Reskinned; bottom-sheet presentation. |
 
+## Second pass — the signed-in app (shipped)
+
+The whole signed-in experience was rebuilt to the mockup, verified live against a
+real backend (real signup → group → ghost → expense → balances → activity →
+settings). No server, schema, or crypto change — every new screen is a
+client-side projection over the ledgers we already sync (`overview.js`).
+
+- **Bottom-dock shell** (Groups / Activity / Settings), replacing the text
+  header; a group / bill / pairing is a pushed screen with its own back button.
+- **Home hero** — aggregate balance across groups, tinted green/red, over group
+  rows that each show where you stand (`overview.js` `loadOverviews` / `totalNet`).
+- **Group view** — Expenses ⇄ Balances segmented tabs; a **FAB** opens the
+  add-expense **sheet**; invite / share / ghost / leave / log moved into a **⋮
+  menu** sheet. Balances tab = net balances + suggested settle-ups + payments.
+- **Activity** — one merged, newest-first feed across all groups
+  (`activityFeed`), "You added …", tap back into the group.
+- **Settings** — profile card + Sign out, over the existing controls.
+- **Sheets** — a reusable `Sheet` (scrim, grab handle, spring-up) for the
+  expense form and the ⋮ menu.
+- Split modes already existed (`split.js`: equal / items / percentage / shares);
+  they ride the new sheet unchanged.
+
+Deferred (small, intentional):
+
+- **Group emoji** — punted; needs a field on the encrypted group metadata.
+- **Split-mode chips** — the mockup styles modes as chips; ours is a working
+  glass `<select>`. Cosmetic; left as-is.
+- **QR camera scan** on the pairing screen — the typed-code path ships; the
+  camera affordance is the only browser-capability-gated piece (needs a JS QR
+  decoder + a `BarcodeDetector` fallback).
+
 ## Rollout — remaining phases
 
 Ordered cheapest-first. Each is independently shippable behind the primitives

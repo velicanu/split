@@ -44,36 +44,36 @@ afterEach(async () => {
 describe('restoring the view a refresh started on', () => {
   test('no fragment shows the group list', async () => {
     await mount(<Home user={user} onLogout={() => {}} />)
-    assert.ok(text().includes('Your groups'))
+    assert.ok(text().includes('Total balance'))
   })
 
   test('#settings comes back to settings, not the list', async () => {
     setHash('#settings')
     await mount(<Home user={user} onLogout={() => {}} />)
     assert.ok(text().includes('Receipt scanning'), 'the settings screen')
-    assert.ok(!text().includes('Your groups'), 'and not the list')
+    assert.ok(!text().includes('Total balance'), 'and not the list')
   })
 
   test('#group/7 comes back to that group', async () => {
     setHash('#group/7')
     await mount(<Home user={user} onLogout={() => {}} />)
     assert.ok(byText('h2', 'Trip'), 'the group, by name')
-    assert.ok(!text().includes('Your groups'))
+    assert.ok(!text().includes('Total balance'))
   })
 })
 
 describe('keeping the fragment in step with the view', () => {
   test('opening settings writes the fragment, so a refresh stays there', async () => {
     await mount(<Home user={user} onLogout={() => {}} />)
-    await click(byText('button', 'settings'))
+    await click(byText('button', 'Settings'))
     assert.equal(window.location.hash, '#settings')
   })
 
   test('returning to the list clears the fragment', async () => {
     setHash('#settings')
     await mount(<Home user={user} onLogout={() => {}} />)
-    // The brand is the way home.
-    await click(byText('strong', 'Split'))
+    // The dock's Groups tab is the way home.
+    await click(byText('button', 'Groups'))
     assert.equal(window.location.hash, '')
   })
 
@@ -83,7 +83,7 @@ describe('keeping the fragment in step with the view', () => {
     // the app instead of returning to the previous screen.
     await mount(<Home user={user} onLogout={() => {}} />)
     const before = window.history.length
-    await click(byText('button', 'settings'))
+    await click(byText('button', 'Settings'))
     assert.ok(window.history.length > before, 'a new entry to go back to')
   })
 })
@@ -101,11 +101,11 @@ describe('the back gesture', () => {
 
   test('back out of settings returns to where you were', async () => {
     await mount(<Home user={user} onLogout={() => {}} />)
-    await click(byText('button', 'settings'))
+    await click(byText('button', 'Settings'))
     assert.ok(text().includes('Receipt scanning'))
 
     await goBackTo('') // the list entry the settings push sat on top of
-    assert.ok(text().includes('Your groups'), 'back to the list, not out of the app')
+    assert.ok(text().includes('Total balance'), 'back to the list, not out of the app')
     assert.ok(!text().includes('Receipt scanning'))
   })
 
@@ -119,6 +119,6 @@ describe('the back gesture', () => {
     assert.ok(byText('h2', 'Trip'), 'forward into the group')
 
     await goBackTo('')
-    assert.ok(text().includes('Your groups'))
+    assert.ok(text().includes('Total balance'))
   })
 })
