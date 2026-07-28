@@ -1,3 +1,14 @@
+/* Border-box everywhere: a full-width element plus padding must stay within the
+   viewport, not push past it. Without this, `width: 100%` + padding on the
+   signed-in shell overflowed horizontally on a phone — you could scroll
+   sideways, and the fixed bottom dock (pinned to the viewport) no longer lined
+   up with the over-wide content. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 /* Colour tokens. Light is the default; dark is applied two ways that share one
    palette: when the system prefers dark and the user hasn't forced light, and
    when the user explicitly picks dark. The theme toggle (theme.js) sets
@@ -121,6 +132,10 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
+  /* Belt to the box-sizing braces: never allow a sideways scroll. `clip` (not
+     `hidden`) doesn't create a scroll container, so it can't disturb the
+     viewport-fixed dock or sheets. */
+  overflow-x: clip;
 }
 
 /* Ambient colour field: four slow-drifting blobs, blurred into a soft wash the
