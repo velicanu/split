@@ -127,7 +127,7 @@ export function Auth({ onAuth }) {
   )
   return (
     <main>
-      <h1>Split</h1>
+      <h1 className="wordmark">Split</h1>
       {tabs}
 
       {page === 'pair' ? (
@@ -179,7 +179,7 @@ export function Auth({ onAuth }) {
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete={page === 'signin' ? 'current-password' : 'new-password'}
               />
-              <button disabled={busy}>
+              <button className="tonal" disabled={busy}>
                 {page === 'signin' ? 'Sign in with password' : 'Sign up with password'}
               </button>
             </form>
@@ -191,7 +191,9 @@ export function Auth({ onAuth }) {
                   onChange={(e) => setCode(e.target.value)}
                   autoComplete="off"
                 />
-                <button disabled={busy}>Sign in with recovery code</button>
+                <button className="tonal" disabled={busy}>
+                  Sign in with recovery code
+                </button>
               </form>
             )}
           </div>
