@@ -221,6 +221,13 @@ const open = async (ai = AI) => {
   )
 }
 
+// The add-expense form now lives in a sheet behind the + FAB, the group's
+// invite / ghost / log controls behind the ⋮ menu, and balances behind a tab.
+// These open each before the old assertions run.
+const openAdd = () => click($('.fab'))
+const openMenu = () => click(byText('button', '⋮'))
+const goBalances = () => click(byText('button', 'Balances'))
+
 const addForm = () => byText('h3', 'Add an expense')?.closest('form')
 const descriptionField = () => addForm().querySelector('input')
 const amountField = () => addForm().querySelectorAll('input')[1]
@@ -243,6 +250,7 @@ describe('creating an expense with a receipt', () => {
   test('files the receipt id with the expense', async () => {
     const api = await fakeApi()
     await open()
+    await openAdd()
     await upload(attachControl(), { name: 'receipt.jpg' })
     await fillAndSubmit()
 
@@ -251,17 +259,20 @@ describe('creating an expense with a receipt', () => {
     assert.match(created.payload.receipts[0], /^[0-9a-f]{64}$/)
   })
 
-  test('clears the form once the expense is filed', async () => {
+  test('the next add starts fresh, not on the last draft', async () => {
     // The bug: creating doesn't change the form's key, so without an explicit
-    // reset the draft — receipt thumbnail and all — sat there afterwards.
+    // reset the draft — receipt thumbnail and all — sat there afterwards. The
+    // sheet now closes on submit; reopening it must give a clean form.
     const api = await fakeApi()
     await open()
+    await openAdd()
     await upload(attachControl(), { name: 'receipt.jpg' })
     assert.equal(thumbs().length, 1, 'thumbnail should show while drafting')
 
     await fillAndSubmit()
-
     assert.equal(api.posted.length, 1, 'sanity: the expense was actually filed')
+
+    await openAdd() // reopen for a second expense
     assert.equal(thumbs().length, 0, 'receipt should not outlive the draft')
     assert.equal(descriptionField().value, '')
     assert.equal(amountField().value, '')
@@ -270,8 +281,10 @@ describe('creating an expense with a receipt', () => {
   test('a second expense does not inherit the first receipt', async () => {
     const api = await fakeApi()
     await open()
+    await openAdd()
     await upload(attachControl(), { name: 'receipt.jpg' })
     await fillAndSubmit({ description: 'First' })
+    await openAdd()
     await fillAndSubmit({ description: 'Second' })
 
     const [first, second] = api.posted
@@ -381,6 +394,7 @@ describe('the add form', () => {
     // button lives on the detail view instead.
     await fakeApi()
     await open()
+    await openAdd()
     await upload(attachControl(), { name: 'receipt.jpg' })
     assert.equal(thumbs().length, 1)
     assert.equal(byText('button', 'scan'), undefined)
@@ -392,6 +406,7 @@ describe('what actually crosses the wire', () => {
   test('an expense leaves this device encrypted', async () => {
     const api = await fakeApi()
     await open()
+    await openAdd()
     await change(descriptionField(), 'Anniversary dinner')
     await change(amountField(), '99.99')
     await submit(addForm())
@@ -487,10 +502,11 @@ describe('recovering an account, from the group side', () => {
   ]
 
   // Read the balances panel structurally: matching on display names in the
-  // whole page would trip over 'd' being a prefix of 'd-again'.
+  // whole page would trip over 'd' being a prefix of 'd-again'. It lives under
+  // the Balances tab now, headed "Net balances".
   const balances = () =>
     Object.fromEntries(
-      [...(byText('h3', 'Balances')?.nextElementSibling?.children ?? [])].map(
+      [...(byText('h3', 'Net balances')?.nextElementSibling?.children ?? [])].map(
         (li) => [li.children[0].textContent, li.children[1].textContent]
       )
     )
@@ -517,6 +533,7 @@ describe('recovering an account, from the group side', () => {
       payload: { user_id: 3, display_name: 'd-again', claims: 2 },
     })
     await open()
+    await goBalances()
 
     assert.deepEqual(balances(), {
       v: 'is owed $5.00',
@@ -548,7 +565,8 @@ describe('the ledger log', () => {
   const openLog = async () => {
     const api = await fakeApi({ seed })
     await open()
-    await click(byText('button', 'log'))
+    await openMenu()
+    await click(byText('button', 'view log'))
     return api
   }
 
@@ -610,6 +628,7 @@ describe('someone not using the app', () => {
   test('can be added, and is split with like anyone else', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
 
     const form = byText('h4', 'Someone not using the app')?.closest('form')
     await change(form.querySelector('input'), 'Fran')
@@ -630,6 +649,7 @@ describe('someone not using the app', () => {
   test('is sealed like every other event', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
     const form = byText('h4', 'Someone not using the app')?.closest('form')
     await change(form.querySelector('input'), 'Fran')
     await submit(form)
@@ -642,6 +662,7 @@ describe('someone not using the app', () => {
   test('two ghosts get different ids', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
     for (const name of ['Fran', 'Sam']) {
       const form = byText('h4', 'Someone not using the app')?.closest('form')
       await change(form.querySelector('input'), name)
@@ -657,6 +678,7 @@ describe('someone not using the app', () => {
   test('a nameless ghost is refused before it is sent', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
     const form = byText('h4', 'Someone not using the app')?.closest('form')
     await submit(form)
     assert.ok(text().includes('Give them a name'))
@@ -670,6 +692,7 @@ describe('inviting someone', () => {
   test('creates a ghost and a link that names them', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
 
     await change(inviteForm().querySelector('input'), 'Fran')
     await submit(inviteForm())
@@ -693,6 +716,7 @@ describe('inviting someone', () => {
   test('an existing ghost can be invited without making another', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
     // One ghost, added without an invite.
     const addForm = byText('h4', 'Someone not using the app')?.closest('form')
     await change(addForm.querySelector('input'), 'Sam')
@@ -711,6 +735,7 @@ describe('inviting someone', () => {
   test('refuses a nameless invite before creating anything', async () => {
     const api = await fakeApi()
     await open()
+    await openMenu()
     await submit(inviteForm())
     assert.ok(text().includes('Give them a name'))
     assert.equal(api.posted.filter((e) => e.type === 'member.ghost_added').length, 0)

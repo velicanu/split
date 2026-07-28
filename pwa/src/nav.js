@@ -13,6 +13,7 @@
 export function readView(hash = window.location.hash) {
   const h = hash.replace(/^#/, '')
   if (h === 'settings') return { view: 'settings' }
+  if (h === 'activity') return { view: 'activity' }
   if (h === 'new-bill') return { view: 'newbill' }
   if (h === 'add-device') return { view: 'pairdevice' }
   // A scanned pairing deep link (#pair=<code>) lands the signed-in device on the
@@ -27,6 +28,7 @@ export function readView(hash = window.location.hash) {
 /** The fragment for a view. The list has none, so it reads as a clean URL. */
 export function viewHash({ view, id }) {
   if (view === 'settings') return '#settings'
+  if (view === 'activity') return '#activity'
   if (view === 'newbill') return '#new-bill'
   if (view === 'pairdevice') return '#add-device'
   if (view === 'group') return `#group/${id}`

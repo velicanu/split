@@ -1,39 +1,38 @@
-// The list of your groups, plus create/join. Local-first: the server list is
-// authoritative online, cached names show it offline.
+// The home screen: a total-balance hero across all your groups, then the groups
+// themselves — each showing where you stand in it — plus create/join. Local
+// first, like a group's own page: the server list is authoritative online,
+// cached names show it offline, and every balance is folded from the local
+// ledger (overview.js), so the server never sees a number. plan/04, plan/18.
 
 import { useCallback, useEffect, useState } from 'react'
 
 import { api } from '../api'
+import { money } from '../format'
 import { createGroupKey } from '../groupkeys'
 import { parseInvite } from '../invite'
-import { localGroups, setMeta as setLocalMeta } from '../store'
 import { acceptInvite } from '../join'
+import { loadOverviews, netLabel, totalNet } from '../overview'
+import { localGroups, setMeta as setLocalMeta } from '../store'
 
-export function GroupList({ onOpen }) {
-  const [groups, setGroups] = useState(null)
+export function GroupList({ me, onOpen, onNewBill }) {
+  const [overviews, setOverviews] = useState(null)
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
   const [error, setError] = useState('')
 
-  // Local-first, like a group's own page. The server list is authoritative
-  // when reachable — it knows member counts and which groups you have hidden —
-  // and every entry is cached on the way through, so with no network the list
-  // is still whatever this device last saw rather than a blank page. plan/04.
   const load = useCallback(async () => {
+    let groups
     try {
-      const fresh = await api('groups')
-      setGroups(fresh)
-      for (const g of fresh) {
+      groups = await api('groups')
+      for (const g of groups) {
         await setLocalMeta(g.id, { name: g.name, members: g.members })
       }
     } catch {
-      // Offline. Show the groups this device already knows the name of; a row
-      // with no name is one we hold events for but have never opened, and has
-      // nothing to show yet.
-      const local = await localGroups()
-      setGroups(local.filter((g) => g.name))
+      // Offline: the groups this device already knows a name for.
+      groups = (await localGroups()).filter((g) => g.name)
     }
-  }, [])
+    setOverviews(await loadOverviews(groups, me))
+  }, [me])
   useEffect(() => {
     load()
   }, [load])
@@ -69,48 +68,84 @@ export function GroupList({ onOpen }) {
     }
   }
 
-  if (!groups) return null
+  if (!overviews) return null
+
+  const total = totalNet(overviews)
+  const totalTone = total === 0 ? 'muted' : total > 0 ? 'pos' : 'neg'
 
   return (
     <section>
-      <h2>Your groups</h2>
-      {groups.length === 0 && (
+      <h1 className="screen-title">Split</h1>
+
+      <div className={`card hero ${total < 0 ? 'owe' : total > 0 ? 'owed' : ''}`}>
+        <span className="muted">Total balance</span>
+        <strong className={`hero-amt ${totalTone}`}>{money(total)}</strong>
+        <span className="muted">
+          {total === 0
+            ? 'all settled up'
+            : total > 0
+              ? "you're owed across all groups"
+              : 'you owe across all groups'}
+        </span>
+      </div>
+
+      <h3 className="section-title">Groups</h3>
+      {overviews.length === 0 && (
         <p className="muted">No groups yet — create or join one below.</p>
       )}
       <ul className="list">
-        {groups.map((g) => (
-          <li key={g.id}>
-            <button className="row" onClick={() => onOpen(g.id)}>
-              <span>{g.name}</span>
-              <span className="muted">
-                {typeof g.members === 'number'
-                  ? `${g.members} member${g.members === 1 ? '' : 's'}`
-                  : 'offline'}
-              </span>
-            </button>
-          </li>
-        ))}
+        {overviews.map((o) => {
+          const label = o.state ? netLabel(o.myNet) : { text: 'offline', tone: 'muted' }
+          return (
+            <li key={o.id}>
+              <button className="row gitem" onClick={() => onOpen(o.id)}>
+                <span className="shape" aria-hidden="true">
+                  👥
+                </span>
+                <span className="gitem-main">
+                  <span className="title">{o.name}</span>
+                  <span className="sub muted">
+                    {typeof o.members === 'number'
+                      ? `${o.members} member${o.members === 1 ? '' : 's'}`
+                      : 'offline'}
+                  </span>
+                </span>
+                <span className={`amt ${label.tone}`}>{label.text}</span>
+              </button>
+            </li>
+          )
+        })}
       </ul>
+
       <div className="cols">
         <form onSubmit={create}>
-          <h3>Create a group</h3>
+          <h3 className="section-title">Create a group</h3>
           <input
             placeholder="group name"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-          <button type="submit">Create</button>
+          <button type="submit">+ New group</button>
         </form>
         <form onSubmit={join}>
-          <h3>Join a group</h3>
+          <h3 className="section-title">Join a group</h3>
           <input
             placeholder="paste invite link"
             value={code}
             onChange={(e) => setCode(e.target.value)}
           />
-          <button type="submit">Join</button>
+          <button className="tonal" type="submit">
+            Join
+          </button>
         </form>
       </div>
+      {onNewBill && (
+        <p className="center">
+          <button className="link" onClick={onNewBill}>
+            or split a one-off bill
+          </button>
+        </p>
+      )}
       {error && <p className="error">{error}</p>}
     </section>
   )

@@ -44,7 +44,7 @@ const maskKey = (key) => `…${String(key).slice(-4)}`
 
 // Provider settings. There is no default provider — with no keys the scanning
 // feature simply doesn't exist. Adding a key (or switching) makes it active.
-export function Settings({ ai, user, onChanged, onPair, onClose }) {
+export function Settings({ ai, user, onChanged, onPair, onLogout, onClose }) {
   const [drafts, setDrafts] = useState({})
   const [error, setError] = useState('')
 
@@ -69,9 +69,17 @@ export function Settings({ ai, user, onChanged, onPair, onClose }) {
 
   return (
     <section>
-      <button className="link" onClick={onClose}>
-        ← back
-      </button>
+      <h1 className="screen-title">Settings</h1>
+
+      <div className="row static profile">
+        <span className="shape" aria-hidden="true">
+          🙂
+        </span>
+        <span className="gitem-main">
+          <span className="title">{user.display_name}</span>
+          <span className="sub muted">@{user.login_handle}</span>
+        </span>
+      </div>
 
       <h2>Appearance</h2>
       <ThemeToggle />
@@ -175,6 +183,12 @@ export function Settings({ ai, user, onChanged, onPair, onClose }) {
       <SignInMethods user={user} />
       <PasswordForm user={user} />
       <Devices onPair={onPair} />
+
+      {onLogout && (
+        <button className="tonal danger sign-out" onClick={onLogout}>
+          Sign out
+        </button>
+      )}
     </section>
   )
 }
