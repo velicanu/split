@@ -29,6 +29,7 @@ shared contract comes first because everything else conforms to it.
 | 16 | [Sign-in methods](16-auth-methods.md) | A recovery code and a passkey (WebAuthn PRF) on top of the password — each just another wrap of the account key, so the server does no new verification. Multi-wrap `key_wraps`, a ≥1-wrap floor, and the weakest-wrap principle. Device pairing deferred. |
 | 17 | [Device pairing](17-device-pairing.md) | Add a device from one you're signed in on, `A`-free: a server rendezvous carries the new device's key to the old one, which signs it and seals the group keys. A short code (QR-carried) points at the rendezvous; an emoji fingerprint match is the security. |
 | 18 | [Liquid-glass UI](18-liquid-glass.md) | A frosted-glass visual language over an ambient colour field, extracted from a full-app mockup: theme-aware tokens, one green primary per screen, pill geometry. First pass reskins the auth front door + shared primitives; the rest (bottom-dock nav, home hero, balances view, split modes, activity feed, sheets) is planned. |
+| 19 | [Federation & scale](19-federation-and-scale.md) | Design note: how groups/people on different self-hosted domains could talk, and how to run multiple backends within one domain. Both reduce to "a group has a home; the client aggregates across homes." Client-side multi-homing is cheap and mostly latent; true server-to-server federation forces global IDs and giving up the single authoritative log; groups are embarrassingly shardable because aggregation is client-side. |
 
 ## Cross-cutting principles
 
