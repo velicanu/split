@@ -23,11 +23,39 @@ const PAGES = [
   ['pair', 'Pair'],
 ]
 
+// Drawn rather than set in type: the eye emoji renders as a full-colour eyeball
+// on most platforms, which is loud next to a monochrome glass field, and there
+// is no struck-through eye in Unicode to pair it with. Strokes take their
+// colour from the button, so it follows the theme for free.
+function Eye({ off }) {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" />
+      <circle cx="12" cy="12" r="2.75" />
+      {off && <path d="M4 20 20 4" />}
+    </svg>
+  )
+}
+
 export function Auth({ onAuth }) {
   const [page, setPage] = useState('signin')
   const [handle, setHandle] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
+  // Off on arrival, always: a revealed password is for checking a typo, not a
+  // state worth remembering.
+  const [revealed, setRevealed] = useState(false)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -172,13 +200,27 @@ export function Auth({ onAuth }) {
               </div>
             )}
             <form className="method" onSubmit={page === 'signin' ? withPassword : signupPassword}>
-              <input
-                type="password"
-                placeholder="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete={page === 'signin' ? 'current-password' : 'new-password'}
-              />
+              <div className="password-field">
+                <input
+                  type={revealed ? 'text' : 'password'}
+                  placeholder="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={page === 'signin' ? 'current-password' : 'new-password'}
+                />
+                {/* type="button", or it would submit the form it sits in — the
+                    one thing a reveal toggle must never do with a half-typed
+                    password. */}
+                <button
+                  type="button"
+                  className="reveal"
+                  onClick={() => setRevealed((on) => !on)}
+                  aria-label={revealed ? 'Hide password' : 'Show password'}
+                  aria-pressed={revealed}
+                >
+                  <Eye off={revealed} />
+                </button>
+              </div>
               <button className="tonal" disabled={busy}>
                 {page === 'signin' ? 'Sign in with password' : 'Sign up with password'}
               </button>

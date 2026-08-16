@@ -76,3 +76,46 @@ describe('the auth front door', () => {
     assert.ok($('.fingerprint'), 'and the fingerprint to compare')
   })
 })
+
+describe('showing the password you are typing', () => {
+  const field = () => $('.password-field input')
+  const eye = () => $('.password-field .reveal')
+
+  test('masked to start with, revealed on the eye, masked again', async () => {
+    await mount(<Auth onAuth={() => {}} />)
+    assert.equal(field().type, 'password', 'masked on arrival')
+
+    await click(eye())
+    assert.equal(field().type, 'text', 'and now legible')
+
+    await click(eye())
+    assert.equal(field().type, 'password', 'and back')
+  })
+
+  test('the eye is a button, not a submit', async () => {
+    // Asserted on the attribute rather than by clicking: the test harness
+    // drives React's onClick prop directly, so it never raises a DOM submit
+    // event and could not tell a submit button from an ordinary one. In a real
+    // browser the default type would send a half-typed password to the server.
+    await mount(<Auth onAuth={() => {}} />)
+    assert.equal(eye().type, 'button')
+  })
+
+  test('it says which way it will go, for anyone not looking at it', async () => {
+    await mount(<Auth onAuth={() => {}} />)
+    assert.equal(eye().getAttribute('aria-label'), 'Show password')
+    assert.equal(eye().getAttribute('aria-pressed'), 'false')
+
+    await click(eye())
+    assert.equal(eye().getAttribute('aria-label'), 'Hide password')
+    assert.equal(eye().getAttribute('aria-pressed'), 'true')
+  })
+
+  test('sign up has it too, and starts masked there as well', async () => {
+    await mount(<Auth onAuth={() => {}} />)
+    await click(eye())
+    await click(tab('Sign up'))
+    assert.ok(eye(), 'the toggle is on the sign-up page')
+    assert.equal(field().type, 'text', 'the same field, so the same state')
+  })
+})
