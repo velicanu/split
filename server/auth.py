@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from db import db
-from models import ChallengeIn, DeviceIn, SignupIn, VerifyIn, WrapIn
+from models import ChallengeIn, DeviceIn, DisplayNameIn, SignupIn, VerifyIn, WrapIn
 
 COOKIE = "split_session"
 # A challenge is single-use; this only bounds how long an unused one lingers.
@@ -294,6 +294,32 @@ def me(request: Request):
         "display_name": user["display_name"],
         "device_id": user["device_id"],
     }
+
+
+@router.post("/api/account/name")
+def set_display_name(body: DisplayNameIn, request: Request):
+    """Change the name people see. Only half the job, deliberately.
+
+    `add_member` stamps this into the `member.added` it writes, so this row is
+    what a group you join *from now on* will call you. Groups you are already
+    in took their copy when you joined, and the server cannot change theirs —
+    the client appends a `member.renamed` to each of them. So the two can
+    disagree for as long as it takes those to land, which is a good deal
+    better than the server holding a name it cannot deliver.
+
+    The handle is not touched: it is what people type to sign in.
+    """
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "not logged in")
+    name = body.display_name.strip()
+    if not name:
+        raise HTTPException(400, "display name required")
+    with db() as conn:
+        conn.execute(
+            "UPDATE users SET display_name = ? WHERE id = ?", (name, user["id"])
+        )
+    return {"display_name": name}
 
 
 @router.post("/api/wraps")

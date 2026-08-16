@@ -901,6 +901,158 @@ describe('claiming a member at the moment of joining', () => {
     )
   })
 
+  // A rename is an ordinary appended event, not a rewrite: the log keeps every
+  // name an id ever had, and the fold takes the latest one that was allowed.
+  // Who is allowed is the interesting part — the server stamps `author` on
+  // every event and a client cannot forge it, so this is a rule the fold can
+  // actually enforce rather than merely agree to. See plan/12.
+  describe('renaming', () => {
+    const ghost = (id, display_name) =>
+      ev('member.ghost_added', { member_id: id, display_name })
+    const renamed = (member_id, display_name, author) =>
+      ev('member.renamed', { member_id, display_name }, author)
+    const nameOf = (state, id) =>
+      state.members.find((m) => m.id === id)?.display_name
+
+    test('you may rename yourself', () => {
+      const state = computeState([member(1, 'v'), member(2, 'd'), renamed(2, 'Dragos', 2)])
+      assert.equal(nameOf(state, 2), 'Dragos')
+      assert.equal(nameOf(state, 1), 'v', 'and nobody else moved')
+    })
+
+    test('you may not rename somebody else', () => {
+      // The whole reason the rule is worth having: otherwise any member could
+      // relabel any other, in a log everyone reads.
+      const state = computeState([member(1, 'v'), member(2, 'd'), renamed(2, 'Rude', 1)])
+      assert.equal(nameOf(state, 2), 'd')
+    })
+
+    test('an unsigned rename changes nothing', () => {
+      // A pending local event has no author until the server stamps one.
+      const state = computeState([member(1, 'v'), renamed(1, 'Nope', undefined)])
+      assert.equal(nameOf(state, 1), 'v')
+    })
+
+    test('any member may rename a ghost, who has nobody to speak for them', () => {
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Smaa'),
+        renamed(-100, 'Sam', 1),
+      ])
+      assert.equal(nameOf(state, -100), 'Sam')
+    })
+
+    test('and may rename someone who has since been ghosted', () => {
+      const state = computeState([
+        member(1, 'v'),
+        member(2, 'd'),
+        ev('member.left', { member_id: 2 }),
+        renamed(2, 'Dave (left)', 1),
+      ])
+      assert.equal(nameOf(state, 2), 'Dave (left)')
+    })
+
+    test('the latest rename wins', () => {
+      const state = computeState([
+        member(1, 'v'),
+        renamed(1, 'first', 1),
+        renamed(1, 'second', 1),
+      ])
+      assert.equal(nameOf(state, 1), 'second')
+    })
+
+    test('a refused rename does not undo the valid one before it', () => {
+      // Applied in order and skipped rather than latest-wins-then-filtered,
+      // which would let anyone blank out a rename they were not allowed to make.
+      const state = computeState([
+        member(1, 'v'),
+        member(2, 'd'),
+        renamed(2, 'Dragos', 2),
+        renamed(2, 'Rude', 1),
+      ])
+      assert.equal(nameOf(state, 2), 'Dragos')
+    })
+
+    test('a blank name is ignored, since there is no undo for an event', () => {
+      const state = computeState([member(1, 'v'), renamed(1, '   ', 1)])
+      assert.equal(nameOf(state, 1), 'v')
+    })
+
+    test('a rename of nobody is ignored', () => {
+      const state = computeState([member(1, 'v'), renamed(-999, 'ghosty', 1)])
+      assert.deepEqual(state.members.map((m) => m.id), [1])
+    })
+
+    test('you may rename an identity you have claimed — it is you', () => {
+      // Both sides go through `resolve`, so the rule is "is this identity now
+      // me", not "is this literally my id". Written as a claim of a member who
+      // was never ghosted, which the invite UI would not produce — the fold has
+      // to be right on a log it did not write, the same reason `resolver`
+      // handles cycles it hopes never to see.
+      //
+      // The claimed id is not a live member any more, so what it renames is the
+      // name its old rows are shown to have been written under.
+      const state = computeState([
+        member(1, 'v'),
+        member(2, 'dee'),
+        expense('e1'),
+        member(5, 'dragos', 2),
+        renamed(2, 'Dee (old account)', 5),
+      ])
+      assert.deepEqual(state.ledger[0].formerly, { 5: ['Dee (old account)'] })
+    })
+
+    test('but not one somebody else has claimed', () => {
+      const state = computeState([
+        member(1, 'v'),
+        member(2, 'dee'),
+        expense('e1'),
+        member(5, 'dragos', 2),
+        renamed(2, 'Rude', 1),
+      ])
+      assert.deepEqual(state.ledger[0].formerly, { 5: ['dee'] })
+    })
+
+    test('renaming moves no money', () => {
+      const state = computeState([
+        member(1, 'v'),
+        member(2, 'd'),
+        expense('e1'),
+        renamed(2, 'Dragos', 2),
+      ])
+      assert.equal(netOf(state, 1), 500)
+      assert.equal(netOf(state, 2), -500)
+    })
+
+    test('after a claim, the account renames itself — not the ghost it took', () => {
+      // The claimer speaks for the whole chain, so `resolve` is what the author
+      // check compares. Renaming through the id they claimed is the same act.
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        member(5, 'dragos', -100),
+        renamed(-100, 'Samantha', 5),
+      ])
+      assert.equal(nameOf(state, 5), 'dragos', 'the live member is untouched')
+      // The ghost is claimed away, so its new name shows up as what the history
+      // was written under.
+      const claimed = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        expense('e1', {
+          payers: [{ user_id: 1, paid_cents: 1000 }],
+          splits: [
+            { user_id: 1, share_cents: 500 },
+            { user_id: -100, share_cents: 500 },
+          ],
+        }),
+        renamed(-100, 'Samantha', 1),
+        member(5, 'dragos', -100),
+      ])
+      assert.deepEqual(claimed.ledger[0].formerly, { 5: ['Samantha'] })
+    })
+  })
+
   // Claiming a ghost is meant to be a visible act — plan/12 leans on the log
   // being readable as the only thing guarding a claim on somebody who is owed
   // money. Resolving every reference to the claiming account would leave the

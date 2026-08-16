@@ -28,6 +28,11 @@ class SignupIn(BaseModel):
     wraps: list[WrapIn] = []
 
 
+class DisplayNameIn(BaseModel):
+    # The name people see. Not the handle — that is what you sign in with.
+    display_name: str
+
+
 class ChallengeIn(BaseModel):
     device_pubkey: str
 

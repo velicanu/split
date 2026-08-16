@@ -86,5 +86,5 @@ function Split() {
     )
   }
   if (!user) return <Auth onAuth={setUser} />
-  return <Home user={user} onLogout={() => setUser(null)} />
+  return <Home user={user} onUser={setUser} onLogout={() => setUser(null)} />
 }

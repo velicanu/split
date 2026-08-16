@@ -17,6 +17,7 @@ import {
   unlockWithPassword,
   unlockWithRecovery,
 } from '../auth'
+import { renameMe } from '../rename'
 import { passkeySupported } from '../webauthn'
 import { loadTheme, setTheme } from '../theme'
 
@@ -44,7 +45,59 @@ const maskKey = (key) => `…${String(key).slice(-4)}`
 
 // Provider settings. There is no default provider — with no keys the scanning
 // feature simply doesn't exist. Adding a key (or switching) makes it active.
-export function Settings({ ai, user, onChanged, onPair, onLogout, onClose }) {
+// Changing the name people see. The handle is not offered: it is what you type
+// to sign in, and other devices are enrolled against it.
+//
+// The save reaches two places (rename.js) and can partly succeed — a group this
+// device holds no key for cannot be written to. Saying so is better than a
+// silent half-rename that shows up as one group calling you the wrong thing.
+export function DisplayName({ user, onRenamed }) {
+  const [name, setName] = useState(user.display_name)
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState('')
+  const [error, setError] = useState('')
+
+  const changed = name.trim() && name.trim() !== user.display_name
+
+  async function save(e) {
+    e.preventDefault()
+    setError('')
+    setNote('')
+    setBusy(true)
+    try {
+      const { display_name, missed } = await renameMe(name)
+      onRenamed?.(display_name)
+      setNote(
+        missed
+          ? `Saved. ${missed} group${missed === 1 ? '' : 's'} still shows the old name — open it on a device that holds its key.`
+          : 'Saved.'
+      )
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form className="field" onSubmit={save}>
+      <label htmlFor="display-name">Display name</label>
+      <input
+        id="display-name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="your name"
+      />
+      <button className="tonal" disabled={busy || !changed}>
+        {busy ? 'saving…' : 'Save'}
+      </button>
+      {note && <p className="muted">{note}</p>}
+      {error && <p className="error">{error}</p>}
+    </form>
+  )
+}
+
+export function Settings({ ai, user, onChanged, onRenamed, onPair, onLogout, onClose }) {
   const [drafts, setDrafts] = useState({})
   const [error, setError] = useState('')
 
@@ -80,6 +133,8 @@ export function Settings({ ai, user, onChanged, onPair, onLogout, onClose }) {
           <span className="sub muted">@{user.login_handle}</span>
         </span>
       </div>
+
+      <DisplayName user={user} onRenamed={onRenamed} />
 
       <h2>Appearance</h2>
       <ThemeToggle />

@@ -297,12 +297,64 @@ Being asked the question up front (*Choosing who you are*) makes the wrong
 answer rarer without making it impossible — somebody will still tap past it.
 Rarer is worth having; it is not a reason to add the second mechanism back.
 
+## Changing a name
+
+A display name is set at signup and was, for a while, permanent. It is now an
+appended event like anything else — nothing is rewritten, and the fold takes
+the latest rename an id was allowed to make, exactly as an edited expense is
+the latest revision of itself.
+
+```
+member.renamed { member_id, display_name }
+```
+
+**Who may rename whom is a rule the fold can actually enforce**, which is rare
+here. The server stamps `author` on every event and a client cannot forge it,
+so:
+
+- **An account may rename itself and nobody else.** Compared through `resolve`,
+  so it reads "is this identity now me" rather than "is this literally my id" —
+  which means you may also rename an identity you have claimed, since that is
+  you as well.
+- **Any member may rename a ghost.** A ghost has nobody to speak for them, and
+  a typo would otherwise be permanent. Same reasoning that lets any member add
+  a ghost, or ghost anyone.
+
+Renames are applied in log order and a refused one is *skipped*, not merely
+sorted behind — taking the latest and filtering afterwards would let anyone
+blank out a rename they were not allowed to make. A blank name is ignored: it
+would leave someone unnameable everywhere and there is no undo for an event.
+
+### The name lives in two places
+
+`users.display_name` on the server is what `add_member` stamps into the
+`member.added` it writes, so it is the name a group you join **from now on**
+will call you. Groups you are already in hold their own copy, in an event the
+server can neither read nor write. So renaming is an API call *plus* a
+`member.renamed` appended to each existing group.
+
+Those can disagree in between, and the client says so rather than papering over
+it — a group whose key this device does not hold cannot be told at all. The
+alternative, a transaction across an encrypted log the server cannot write, is
+not available at any price.
+
+### What it does to history
+
+Renaming a claimed ghost changes what old rows are shown to have been *written
+under* (see below). Rename Sam to Samantha and history written under "Sam"
+starts reading `(as Samantha)`.
+
+Accepted deliberately. `formerly` answers *which identity is this row about*,
+labelled with that identity's best-known name; making it point-in-time means
+storing a name per row, which is a great deal of machinery for a caption.
+
 ## Events
 
 ```
 member.added       { user_id, display_name, claims }  server-written, in the clear
 member.ghost_added { member_id, display_name }   any member may add
 member.left        { member_id }                 any member may ghost any member
+member.renamed     { member_id, display_name }   yourself, or any ghost
 group.revived_from { group_id, at_event_id }     first event of a revived group
 ```
 

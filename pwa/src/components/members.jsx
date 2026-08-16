@@ -79,6 +79,69 @@ export function LeaveOrGhost({ members, meId, onGhost }) {
   )
 }
 
+// Fixing a ghost's name. Anyone in the group may do it, for the same reason
+// anyone may add one or ghost anyone: a ghost has nobody to speak for them, and
+// a typo in a name is otherwise permanent. An account, by contrast, can only be
+// renamed by itself — the fold checks that against the author the server stamps
+// on the event, so it is not a rule this screen has to be trusted to keep.
+export function RenameGhost({ members, onRename }) {
+  const [editing, setEditing] = useState(null)
+  const [name, setName] = useState('')
+  const [error, setError] = useState('')
+
+  const ghosts = members.filter((m) => m.ghost)
+  if (!ghosts.length) return null
+
+  const start = (m) => {
+    setError('')
+    setEditing(m.id)
+    setName(m.display_name)
+  }
+
+  async function save(e) {
+    e.preventDefault()
+    setError('')
+    if (!name.trim()) return setError('Give them a name')
+    try {
+      await onRename(editing, name.trim())
+      setEditing(null)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  return (
+    <section className="rename-ghost">
+      <h4>Fix a name</h4>
+      {editing === null ? (
+        <p className="muted">
+          Spelled someone wrong?{' '}
+          {ghosts.map((m) => (
+            <button key={m.id} className="link" onClick={() => start(m)}>
+              {m.display_name}
+            </button>
+          ))}
+        </p>
+      ) : (
+        <form onSubmit={save}>
+          <input
+            placeholder="their name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <div className="row-actions">
+            <button type="submit">Save</button>
+            <button className="link" type="button" onClick={() => setEditing(null)}>
+              cancel
+            </button>
+          </div>
+        </form>
+      )}
+      {error && <p className="error">{error}</p>}
+    </section>
+  )
+}
+
 // A person in the split who isn't in the app. They pay, they owe, they settle
 // up — the ledger treats them exactly like anyone else.
 export function AddGhost({ onAdd }) {
