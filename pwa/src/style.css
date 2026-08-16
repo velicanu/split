@@ -754,6 +754,53 @@ input.pay-amt {
   border-color: var(--stroke);
 }
 
+/* The password field carries a reveal toggle inside its right edge, so the
+   input keeps its pill shape rather than being cut short by a control beside
+   it. The padding is what stops a long password running under the eye. */
+.password-field {
+  position: relative;
+  display: flex;
+}
+.password-field input {
+  flex: 1;
+  min-width: 0;
+  padding-right: 2.9rem;
+}
+/* Undoing the green gradient pill every button starts as: this one is an
+   affordance inside a field, not an action competing with the one below it. */
+.password-field .reveal {
+  position: absolute;
+  right: 0.3rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2.2rem;
+  height: 2.2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  box-shadow: none;
+  color: var(--muted);
+  transition: color 0.15s;
+}
+.password-field .reveal:hover {
+  color: var(--fg);
+}
+/* The shared button:active scale is anchored at the centre, which fights the
+   translate that centres this one vertically — it would jump on every tap. */
+.password-field .reveal:active {
+  transform: translateY(-50%) scale(0.92);
+  filter: none;
+}
+.password-field .reveal:focus-visible {
+  color: var(--fg);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ------------------------------------------------------------------------
    The signed-in app: a bottom-dock shell, a total-balance hero, glass group
    rows, a tabbed group view with a FAB, and bottom sheets. See plan/18.
