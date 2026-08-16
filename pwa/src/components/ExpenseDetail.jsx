@@ -1,9 +1,10 @@
 // The read view of one expense: who paid, the receipt items, who owes what, and
 // comments. Editing controls hide in readOnly (share-link viewers).
 
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 
 import { money } from '../format'
+import { Formerly } from './members'
 import { ReceiptThumb } from './ReceiptThumb'
 
 // Detail overlay for one expense: per-person paid/owed, plus comments (anyone
@@ -105,7 +106,10 @@ export function ExpenseDetail({
         <ul className="list">
           {expense.payers.map((p) => (
             <li key={p.user_id} className="row static">
-              <span>{nameById[p.user_id] || '?'}</span>
+              <span>
+                {nameById[p.user_id] || '?'}
+                <Formerly names={expense.formerly?.[p.user_id]} />
+              </span>
               <span>{money(p.paid_cents)}</span>
             </li>
           ))}
@@ -122,9 +126,13 @@ export function ExpenseDetail({
                       <span>{it.name || 'item'}</span>
                       <span className="muted">
                         {it.claimed_by?.length
-                          ? it.claimed_by
-                              .map((id) => nameById[id] || '?')
-                              .join(', ')
+                          ? it.claimed_by.map((id, i) => (
+                              <Fragment key={id}>
+                                {i > 0 && ', '}
+                                {nameById[id] || '?'}
+                                <Formerly names={expense.formerly?.[id]} />
+                              </Fragment>
+                            ))
                           : 'everyone'}
                       </span>
                     </div>
@@ -158,7 +166,10 @@ export function ExpenseDetail({
         <ul className="list">
           {expense.splits.map((s) => (
             <li key={s.user_id} className="row static">
-              <span>{nameById[s.user_id] || '?'}</span>
+              <span>
+                {nameById[s.user_id] || '?'}
+                <Formerly names={expense.formerly?.[s.user_id]} />
+              </span>
               <span>{money(s.share_cents)}</span>
             </li>
           ))}

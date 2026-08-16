@@ -901,6 +901,226 @@ describe('claiming a member at the moment of joining', () => {
     )
   })
 
+  // Claiming a ghost is meant to be a visible act — plan/12 leans on the log
+  // being readable as the only thing guarding a claim on somebody who is owed
+  // money. Resolving every reference to the claiming account would leave the
+  // history reading as though the ghost had never existed, so the fold carries
+  // the name each row was written under. Display only: none of it is allowed
+  // to move a cent, which every test here re-checks.
+  describe('the name a row was written under', () => {
+    const ghost = (id, display_name) => ev('member.ghost_added', { member_id: id, display_name })
+
+    test('an expense predating the claim keeps the ghost’s name', () => {
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        expense('e1', {
+          payers: [{ user_id: 1, paid_cents: 1000 }],
+          splits: [
+            { user_id: 1, share_cents: 500 },
+            { user_id: -100, share_cents: 500 },
+          ],
+        }),
+        joins(5, 'dragos', -100),
+      ])
+      const e = state.ledger.find((x) => x.expense_id === 'e1')
+      assert.deepEqual(e.formerly, { 5: ['Sam'] })
+      // And the row itself still reads as the account that owns it now.
+      assert.deepEqual(e.splits, [
+        { user_id: 1, share_cents: 500 },
+        { user_id: 5, share_cents: 500 },
+      ])
+      assert.equal(netOf(state, 5), -500)
+    })
+
+    test('an expense written after the claim carries nothing', () => {
+      // The whole reason this hangs off the row and not the person: "(as Sam)"
+      // on an expense Sam was never named in would be a plain lie.
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        joins(5, 'dragos', -100),
+        expense('e1', {
+          payers: [{ user_id: 1, paid_cents: 1000 }],
+          splits: [
+            { user_id: 1, share_cents: 500 },
+            { user_id: 5, share_cents: 500 },
+          ],
+        }),
+      ])
+      assert.deepEqual(state.ledger.find((x) => x.expense_id === 'e1').formerly, {})
+    })
+
+    test('with no claim at all, nothing is tagged', () => {
+      const state = computeState([member(1, 'v'), member(2, 'd'), expense('e1')])
+      assert.deepEqual(state.ledger[0].formerly, {})
+    })
+
+    test('a row naming the ghost and the claimer stays one line, and is tagged', () => {
+      // mergeRows deliberately sums these. The name is still true of the row,
+      // and the amount beside it is the pair added up.
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        joins(5, 'dragos', -100),
+        expense('e1', {
+          amount_cents: 900,
+          payers: [{ user_id: 1, paid_cents: 900 }],
+          splits: [
+            { user_id: 1, share_cents: 300 },
+            { user_id: -100, share_cents: 300 },
+            { user_id: 5, share_cents: 300 },
+          ],
+        }),
+      ])
+      const e = state.ledger[0]
+      assert.deepEqual(e.splits, [
+        { user_id: 1, share_cents: 300 },
+        { user_id: 5, share_cents: 600 },
+      ])
+      assert.deepEqual(e.formerly, { 5: ['Sam'] })
+    })
+
+    test('a claim chain names every identity the row was written under', () => {
+      // -100 -> 5 -> 9. An old row naming both is true of both.
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        joins(5, 'dragos', -100),
+        expense('e1', {
+          amount_cents: 900,
+          payers: [{ user_id: 1, paid_cents: 900 }],
+          splits: [
+            { user_id: 1, share_cents: 300 },
+            { user_id: -100, share_cents: 300 },
+            { user_id: 5, share_cents: 300 },
+          ],
+        }),
+        joins(9, 'dragos-new', 5),
+      ])
+      // Sorted by the id each name came from, not by payload order, so every
+      // client builds the same string.
+      assert.deepEqual(state.ledger[0].formerly, { 9: ['Sam', 'dragos'] })
+    })
+
+    test('the order is the identities\u2019 own, not the order the rows happen to be in', () => {
+      // Ghost ids are negative and account ids ascend, so sorting by the id a
+      // name came from reads as the order the person went by them. Without it
+      // the list inherits whatever order the payload was written in, which is
+      // arbitrary and would differ between two logs meaning the same thing.
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        joins(5, 'dragos', -100),
+        expense('e1', {
+          amount_cents: 900,
+          payers: [{ user_id: 1, paid_cents: 900 }],
+          splits: [
+            { user_id: 5, share_cents: 300 },
+            { user_id: 1, share_cents: 300 },
+            { user_id: -100, share_cents: 300 },
+          ],
+        }),
+        joins(9, 'dragos-new', 5),
+      ])
+      assert.deepEqual(state.ledger[0].formerly, { 9: ['Sam', 'dragos'] })
+    })
+
+    test('a receipt item claim is tagged, not just the split row', () => {
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        expense('e1', {
+          payers: [{ user_id: 1, paid_cents: 1000 }],
+          splits: [
+            { user_id: 1, share_cents: 500 },
+            { user_id: -100, share_cents: 500 },
+          ],
+          split: {
+            mode: 'items',
+            participants: [1, -100],
+            items: [{ id: 'i1', name: 'Wine', price_cents: 1000, claimed_by: [-100] }],
+          },
+        }),
+        joins(5, 'dragos', -100),
+      ])
+      const e = state.ledger[0]
+      assert.deepEqual(e.split.items[0].claimed_by, [5], 'the id resolved')
+      assert.deepEqual(e.formerly, { 5: ['Sam'] }, 'and the name came with it')
+    })
+
+    test('a name that only ever appears in the recipe is still tagged', () => {
+      // receiptWeights drops item claims by people who are not participants,
+      // so this ghost never reaches payers or splits — but the detail view
+      // renders claimed_by regardless, and an untagged name there beside a
+      // tagged one elsewhere reads as two different people. This is why
+      // `formerly` is taken from the whole payload rather than from the two
+      // fields that usually happen to cover it.
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        expense('e1', {
+          payers: [{ user_id: 1, paid_cents: 1000 }],
+          splits: [{ user_id: 1, share_cents: 1000 }],
+          split: {
+            mode: 'items',
+            participants: [1],
+            items: [{ id: 'i1', name: 'Wine', price_cents: 1000, claimed_by: [-100] }],
+          },
+        }),
+        joins(5, 'dragos', -100),
+      ])
+      const e = state.ledger[0]
+      assert.deepEqual(
+        e.splits,
+        [{ user_id: 1, share_cents: 1000 }],
+        'the claim still buys them nothing'
+      )
+      assert.deepEqual(e.formerly, { 5: ['Sam'] }, 'but the name is available to render')
+    })
+
+    test('a settlement recorded before the claim keeps the name too', () => {
+      const state = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        ev('settlement.created', {
+          settlement_id: 's1',
+          from: -100,
+          to: 1,
+          amount_cents: 500,
+          date: '2026-01-02',
+        }),
+        joins(5, 'dragos', -100),
+      ])
+      const s = state.payments[0]
+      assert.equal(s.from, 5)
+      assert.equal(s.from_name, 'dragos')
+      assert.deepEqual(s.formerly, { 5: ['Sam'] })
+    })
+
+    test('none of it moves a cent', () => {
+      const withNames = computeState([
+        member(1, 'v'),
+        ghost(-100, 'Sam'),
+        expense('e1', {
+          payers: [{ user_id: 1, paid_cents: 1000 }],
+          splits: [
+            { user_id: 1, share_cents: 500 },
+            { user_id: -100, share_cents: 500 },
+          ],
+        }),
+        joins(5, 'dragos', -100),
+      ])
+      // The same log with the ghost never named — balances must be identical.
+      assert.equal(netOf(withNames, 1), 500)
+      assert.equal(netOf(withNames, 5), -500)
+      assert.equal(
+        withNames.balances.reduce((t, b) => t + b.net_cents, 0),
+        0
+      )
+    })
+  })
+
   test('there is no event that lets an existing member become someone else', () => {
     // The point of the whole design. A claim only ever rides on a join, so a
     // member who is already here has nothing to write.

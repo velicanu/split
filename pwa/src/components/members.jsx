@@ -3,6 +3,15 @@
 
 import { useState } from 'react'
 
+// The name a row was written under, when the person it now belongs to goes by
+// something else. Shown beside the current name rather than instead of it:
+// claiming a ghost is meant to be a visible act (plan/12), and a history that
+// silently relabels itself is the one thing that would hide it.
+export function Formerly({ names }) {
+  if (!names?.length) return null
+  return <span className="muted"> (as {names.join(', ')})</span>
+}
+
 // Leaving, and tidying away someone who has stopped using the app. The same
 // act either way: they become a ghost, their balances untouched.
 export function LeaveOrGhost({ members, meId, onGhost }) {

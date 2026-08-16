@@ -4,6 +4,7 @@
 import { useState } from 'react'
 
 import { money } from '../format'
+import { Formerly } from './members'
 
 // Suggested minimal transfers. One click opens an editable amount (prefilled
 // with the suggested default); confirm records it as a settlement.
@@ -93,7 +94,10 @@ export function Payments({ payments, onEdit, onDelete }) {
             <li key={s.settlement_id} className="row static">
               <div className="expense">
                 <span>
-                  {s.from_name} paid {s.to_name} {money(s.amount_cents)}
+                  {s.from_name}
+                  <Formerly names={s.formerly?.[s.from]} /> paid {s.to_name}
+                  <Formerly names={s.formerly?.[s.to]} />{' '}
+                  {money(s.amount_cents)}
                 </span>
                 <span className="muted">{s.date}</span>
               </div>
