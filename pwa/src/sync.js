@@ -9,6 +9,8 @@
 // it already has. See plan/04.
 
 import { api } from './api'
+import { encryptPayload } from './crypto'
+import { groupKey } from './groupkeys'
 import {
   localEvents,
   meta,
@@ -44,6 +46,21 @@ export async function append(groupId, { event_id, type, payload }) {
   await putEvents([row])
   await queue(row)
   return row
+}
+
+/** The only way an event reaches the server: sealed with the group key first,
+ *  so no caller can forget to encrypt.
+ *
+ *  Lives here rather than in the one screen that used to own it because a
+ *  rename has to reach every group at once, from no screen in particular. */
+export async function appendSealed(groupId, type, payload) {
+  const key = await groupKey(groupId)
+  if (!key) throw new Error('No key for this group on this device')
+  return append(groupId, {
+    event_id: crypto.randomUUID(),
+    type,
+    payload: { enc: await encryptPayload(key, payload) },
+  })
 }
 
 /** Send everything queued for a group, oldest first.

@@ -26,7 +26,7 @@ const DOCK = [
   ['settings', 'Settings', '⚙️'],
 ]
 
-export function Home({ user, onLogout }) {
+export function Home({ user, onUser, onLogout }) {
   // The fragment at load: an invite to consume, or a view to restore. Captured
   // once, because the invite key is cleared from the address bar below.
   const openedAt = useState(() => window.location.hash)[0]
@@ -140,6 +140,7 @@ export function Home({ user, onLogout }) {
             ai={ai}
             user={user}
             onChanged={loadAi}
+            onRenamed={(display_name) => onUser?.({ ...user, display_name })}
             onPair={() => navigate({ view: 'pairdevice' })}
             onLogout={logout}
             onClose={() => navigate({ view: 'list' })}

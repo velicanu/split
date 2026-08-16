@@ -104,6 +104,14 @@ export function computeState(events) {
   // Members who have been turned into ghosts. They keep their history and
   // their balances; they simply have nobody attached any more.
   const ghosted = new Set()
+  // Ids introduced as ghosts, as opposed to accounts that joined. Kept apart
+  // from `ghosted` because the two answer different questions: this one is who
+  // never had an account, that one is who stopped having one.
+  const bornGhost = new Set()
+  // Rename events, in log order, applied after the loop — the rule for who may
+  // write one needs `resolve`, which does not exist until the alias map is
+  // complete. See applyRenames.
+  const renames = []
   // expense_id -> its latest event. An edit is just a new expense.updated row
   // with the same expense_id; the latest one wins (append order is the total
   // order). Both payers and splits are frozen per revision.
@@ -135,6 +143,7 @@ export function computeState(events) {
       // Identical to a member everywhere the money is concerned.
       const p = e.payload
       if (!p || typeof p.member_id !== 'number') continue
+      bornGhost.add(p.member_id)
       if (!memberIds.includes(p.member_id)) {
         members.push({
           id: p.member_id,
@@ -160,6 +169,18 @@ export function computeState(events) {
       if (!p || !p.settlement_id) continue
       const prev = settle[p.settlement_id]
       if (!prev || e.id > prev.id) settle[p.settlement_id] = e
+    } else if (e.type === 'member.renamed') {
+      // Changing a display name without rewriting anything: the log stays
+      // append-only and the latest rename an id is allowed wins. Collected
+      // rather than applied, because whether it is allowed depends on the
+      // claim chain, which is not finished being built yet. See plan/12.
+      const p = e.payload
+      if (!p || typeof p.member_id !== 'number') continue
+      const name = typeof p.display_name === 'string' ? p.display_name.trim() : ''
+      // A blank name would leave someone unnameable in every list they appear
+      // in, and there is no undo for an event.
+      if (!name) continue
+      renames.push({ id: e.id, member_id: p.member_id, display_name: name, author: e.author })
     } else if (e.type === 'member.left') {
       // Anyone may ghost anyone, including themselves — leaving is ghosting
       // yourself. What stops this being a hostile act is that it takes nothing
@@ -178,6 +199,25 @@ export function computeState(events) {
   }
 
   const resolve = resolver(alias)
+
+  // Who may rename whom. A ghost has nobody to speak for them, so any member
+  // may fix their name — the same reasoning that lets any member add one, or
+  // ghost anyone. An account speaks for itself and nobody else: the server
+  // stamps `author` on every event and a client cannot forge it, so this is
+  // one of the few rules in an end-to-end encrypted design the fold can
+  // actually enforce rather than merely agree to. See plan/12.
+  //
+  // Applied in log order, so the last rename that passes wins — and one that
+  // does not is skipped rather than blocking the valid one before it.
+  const isGhost = (id) => bornGhost.has(id) || ghosted.has(id)
+  for (const r of renames) {
+    const target = members.find((m) => m.id === r.member_id)
+    if (!target) continue
+    const own = r.author != null && resolve(r.author) === resolve(r.member_id)
+    if (!isGhost(r.member_id) && !own) continue
+    target.display_name = r.display_name
+  }
+
   // Everyone a claim pointed away from stops being a separate person.
   const claimedAway = new Set(
     [...alias.keys()].filter((id) => resolve(id) !== id)

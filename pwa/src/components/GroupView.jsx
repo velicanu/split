@@ -16,8 +16,8 @@ import {
   pendingCount,
   setMeta as setLocalMeta,
 } from '../store'
-import { append, flush, sync } from '../sync'
-import { AddGhost, LeaveOrGhost } from './members'
+import { appendSealed, flush, sync } from '../sync'
+import { AddGhost, LeaveOrGhost, RenameGhost } from './members'
 import { ExpenseDetail } from './ExpenseDetail'
 import { ExpenseForm } from './ExpenseForm'
 import { InviteLink, ShareReadOnly } from './sharing'
@@ -146,23 +146,12 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
     ? state.ledger.find((x) => x.expense_id === viewingId) || null
     : null
 
-  // The only way an event reaches the server: everything is sealed with the
-  // group key first, so no caller can forget to encrypt.
+  // Sealed and stored here first, so the write is durable and on screen whether
+  // or not there is a network. The id comes back provisional and is replaced by
+  // the server's when it lands — which is why ghosting, which needs a real log
+  // position, flushes before reading it. See appendSealed.
   const appendEvent = useCallback(
-    async (type, payload) => {
-      const key = await groupKey(groupId)
-      if (!key) throw new Error('No key for this group on this device')
-      // Stored here first, so the write is durable and on screen whether or
-      // not there is a network. The id comes back provisional and is replaced
-      // by the server's when it lands — which is why ghosting, which needs a
-      // real log position, flushes before reading it.
-      const row = await append(groupId, {
-        event_id: crypto.randomUUID(),
-        type,
-        payload: { enc: await encryptPayload(key, payload) },
-      })
-      return row
-    },
+    (type, payload) => appendSealed(groupId, type, payload),
     [groupId]
   )
 
@@ -292,6 +281,13 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
     // Returned so an invite can name them: inviting someone is inviting them
     // to be this member.
     return member_id
+  }
+
+  // Renaming a ghost is an ordinary append, like adding one. Who is allowed to
+  // rename whom is settled by the fold, not here. See rename.js and plan/12.
+  const renameGhost = async (member_id, display_name) => {
+    await appendEvent('member.renamed', { member_id, display_name })
+    await refresh()
   }
 
   const recordSettlement = (from, to, amount_cents) =>
@@ -596,6 +592,7 @@ export function GroupView({ groupId, me, ai, onBack, onOpen }) {
           />
           <ShareReadOnly groupId={groupId} code={meta.code} />
           <AddGhost onAdd={addGhost} />
+          <RenameGhost members={state.members} onRename={renameGhost} />
           <LeaveOrGhost members={state.members} meId={meId} onGhost={ghostMember} />
         </Sheet>
       )}

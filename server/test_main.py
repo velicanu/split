@@ -115,6 +115,7 @@ CLIENT_WRITTEN_EVENTS = [
     "comment.updated",
     "member.ghost_added",
     "member.left",
+    "member.renamed",
     "group.revived_from",
 ]
 
@@ -868,6 +869,50 @@ def test_preview_needs_an_account_and_a_real_code():
     assert owner.get("/api/groups/preview?code=nosuchcode").status_code == 404
     # An account is required, so a guessed code is not an anonymous window.
     assert client.get(f"/api/groups/preview?code={group['code']}").status_code == 401
+
+
+def test_changing_your_display_name():
+    """Half the job by design: this row is what a group you join *later* is
+    stamped with. The groups you are already in hold their own copy, in an
+    event the server cannot read, and the client appends a member.renamed to
+    each of them."""
+    user = signed_up("rn-user")
+    assert user.get("/api/me").json()["display_name"] == "rn-user"
+
+    res = user.post("/api/account/name", json={"display_name": "  Renamed  "})
+    assert res.status_code == 200
+    assert res.json()["display_name"] == "Renamed"
+    assert user.get("/api/me").json()["display_name"] == "Renamed"
+
+    # The handle is untouched — it is what you sign in with.
+    assert user.get("/api/me").json()["login_handle"] == "rn-user"
+
+
+def test_a_renamed_account_joins_new_groups_under_the_new_name():
+    owner = signed_up("rn-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+
+    joiner = signed_up("rn-joiner")
+    joiner.post("/api/account/name", json={"display_name": "New Name"})
+    joiner.post("/api/groups/join", json={"code": group["code"]})
+
+    added = [
+        e
+        for e in events_of(owner, group["id"])["events"]
+        if e["type"] == "member.added"
+    ]
+    assert added[-1]["payload"]["display_name"] == "New Name"
+
+
+def test_a_blank_display_name_is_refused_and_auth_is_required():
+    user = signed_up("rn-blank")
+    assert (
+        user.post("/api/account/name", json={"display_name": "   "}).status_code == 400
+    )
+    assert user.get("/api/me").json()["display_name"] == "rn-blank"
+    assert (
+        client.post("/api/account/name", json={"display_name": "x"}).status_code == 401
+    )
 
 
 def test_hiding_a_group_removes_it_from_the_list_but_keeps_the_membership():

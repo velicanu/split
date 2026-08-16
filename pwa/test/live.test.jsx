@@ -20,7 +20,8 @@ import { after, describe, test } from 'node:test'
 import { enrolWithRecovery, signup } from '../src/auth.js'
 import { forgetDeviceKey, forgetLocalLedger } from '../src/store.js'
 import { api } from '../src/api.js'
-import { encryptPayload } from '../src/crypto.js'
+import { decryptPayload, encryptPayload } from '../src/crypto.js'
+import { computeState } from '../src/ledger.js'
 import { createGroupKey, forgetGroupKeys, groupKey } from '../src/groupkeys.js'
 import {
   approvePairing,
@@ -218,6 +219,53 @@ describe('against a real server', { skip }, () => {
     // And the preview now says so, which is what stops the screen offering a
     // claim the server would only refuse.
     assert.equal((await loadJoinPreview(invite)).joined, true)
+  })
+
+  test('who may rename whom rests on an author only the server can set', async () => {
+    // The one part of renaming a fake cannot vouch for. The rule is that an
+    // account may rename itself and nobody else, and the fold decides it from
+    // `author` — which the server stamps and no client can put there. A fake
+    // that writes the author itself would agree with any rule at all.
+    await signup({
+      login_handle: handle('rn-a'),
+      display_name: 'Ada',
+      password: 'live-test-password',
+    })
+    const group = await api('groups', { name: 'Renames' })
+    const key = await createGroupKey(group.id)
+    const ada = (await api('me')).id
+
+    await api(`groups/${group.id}/events`, {
+      event_id: crypto.randomUUID(),
+      type: 'member.renamed',
+      payload: { enc: await encryptPayload(key, { member_id: ada, display_name: 'Ada L' }) },
+    })
+
+    // A second account joins and tries to relabel the first.
+    jar = ''
+    await signup({
+      login_handle: handle('rn-b'),
+      display_name: 'Bo',
+      password: 'live-test-password',
+    })
+    await api('groups/join', { code: group.code })
+    await api(`groups/${group.id}/events`, {
+      event_id: crypto.randomUUID(),
+      type: 'member.renamed',
+      payload: { enc: await encryptPayload(key, { member_id: ada, display_name: 'Rude' }) },
+    })
+
+    // Fold what the server actually served, authors and all.
+    const { events } = await api(`groups/${group.id}/events?since=0`)
+    const folded = []
+    for (const e of events) {
+      folded.push(
+        e.payload?.enc ? { ...e, payload: await decryptPayload(key, e.payload.enc) } : e
+      )
+    }
+    const state = computeState(folded)
+    const name = state.members.find((m) => m.id === ada)?.display_name
+    assert.equal(name, 'Ada L', 'her own rename stuck, the other account\u2019s did not')
   })
 
   test('logging out un-enrols this device for real', async () => {
