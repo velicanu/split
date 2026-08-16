@@ -29,6 +29,8 @@ import {
   startPairing,
 } from '../src/pairing.js'
 import { buildInviteLink, parseInvite } from '../src/invite.js'
+import { acceptInvite } from '../src/join.js'
+import { loadJoinPreview } from '../src/preview.js'
 import {
   claimGhost,
   createBill,
@@ -144,6 +146,78 @@ describe('against a real server', { skip }, () => {
       () => api('groups/join', { code: invite.code, claims: ghostId }),
       /already been claimed/
     )
+  })
+
+  test('a group link previews the real ghosts, and claiming one sticks', async () => {
+    // The group link names nobody, so the joiner picks who they are from a list
+    // the *server* served and the *client* decrypted. A fake can agree with
+    // itself about that shape; only a real server can say whether the preview
+    // hands over a decryptable ghost name — and whether it withholds the money.
+    await signup({
+      login_handle: handle('gl-owner'),
+      display_name: 'Owner',
+      password: 'live-test-password',
+    })
+    const group = await api('groups', { name: 'Group link' })
+    const key = await createGroupKey(group.id)
+    const ghostId = -(Math.floor(Math.random() * 2 ** 45) + 1)
+    await api(`groups/${group.id}/events`, {
+      event_id: crypto.randomUUID(),
+      type: 'member.ghost_added',
+      payload: { enc: await encryptPayload(key, { member_id: ghostId, display_name: 'Sam' }) },
+    })
+    await api(`groups/${group.id}/events`, {
+      event_id: crypto.randomUUID(),
+      type: 'expense.created',
+      payload: {
+        enc: await encryptPayload(key, {
+          expense_id: crypto.randomUUID(),
+          description: 'Dinner',
+          amount_cents: 1000,
+          payers: [],
+          splits: [],
+        }),
+      },
+    })
+
+    const invite = parseInvite(buildInviteLink('https://split.example', group.code, key))
+    assert.equal(invite.member_id, null, 'a group link names nobody')
+
+    jar = ''
+    await signup({
+      login_handle: handle('gl-joiner'),
+      display_name: 'Joiner',
+      password: 'live-test-password',
+    })
+
+    const preview = await loadJoinPreview(invite)
+    assert.equal(preview.id, group.id)
+    assert.equal(preview.joined, false)
+    assert.deepEqual(
+      preview.ghosts.map((g) => g.display_name),
+      ['Sam'],
+      'the ghost name came back sealed and opened with the key from the link'
+    )
+
+    // The narrow half of the bargain: the code buys who is in the split, not
+    // what they spent. Asserted on the wire, not on the folded state.
+    const raw = await api(`groups/preview?code=${encodeURIComponent(group.code)}`)
+    assert.deepEqual(
+      [...new Set(raw.events.map((e) => e.type))].sort(),
+      ['member.added', 'member.ghost_added'],
+      'no expenses came with it'
+    )
+
+    const joined = await acceptInvite({ ...invite, member_id: ghostId })
+    assert.equal(joined.id, group.id)
+    const added = (await api(`groups/${group.id}/events?since=0`)).events.filter(
+      (e) => e.type === 'member.added'
+    )
+    assert.equal(added.at(-1).payload.claims, ghostId, 'the claim survived the join')
+
+    // And the preview now says so, which is what stops the screen offering a
+    // claim the server would only refuse.
+    assert.equal((await loadJoinPreview(invite)).joined, true)
   })
 
   test('logging out un-enrols this device for real', async () => {

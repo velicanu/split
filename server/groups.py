@@ -180,8 +180,73 @@ def join_group(body: JoinGroup, request: Request):
             ).fetchone()
             if taken:
                 raise HTTPException(409, "that member has already been claimed")
-        add_member(conn, group["id"], user, claims=body.claims)
+        added = add_member(conn, group["id"], user, claims=body.claims)
+        # Claiming happens at the moment of joining and nowhere else (plan/12),
+        # so a claim from somebody already in the group has no moment to happen
+        # at. add_member drops it silently; saying so is the difference between
+        # "that didn't work" and a joiner who thinks they took over a ghost and
+        # finds their history missing. Reachable now that a group link can be
+        # opened twice — a second tab, or the back button.
+        if body.claims is not None and not added:
+            raise HTTPException(409, "you are already in this group")
     return {"id": group["id"], "name": group["name"], "code": group["code"]}
+
+
+# Only these come back from a preview: what a group link buys is "who is in
+# this split", never the money.
+MEMBER_EVENTS = ("member.added", "member.ghost_added", "member.left")
+
+
+@router.get("/api/groups/preview")
+def preview_group(code: str, request: Request):
+    """Who is already in a group, for someone holding a group link but not yet
+    a member of it.
+
+    A group link names no member (see invite.js), so the person opening it is
+    the one who says whether they are somebody the group has been splitting
+    with. That choice needs the ghost names, and claiming is only possible *at*
+    the instant of joining — so the names have to be readable before joining,
+    or the choice cannot be offered at all.
+
+    Serving them gives away nothing that joining would not: the join code is
+    the write capability, and whoever holds it can join and then read the whole
+    feed. Two things keep it narrow anyway. Only `member.*` is returned, so the
+    code buys the member list and not the expenses; and an account is still
+    required, so a guessed code is not an anonymous window onto a group.
+
+    This must stay declared above `get_group` — that route's `group_id` is an
+    int, so "preview" would be a 422 there rather than falling through to here.
+    """
+    user = require_user(request)
+    with db() as conn:
+        group = conn.execute(
+            "SELECT id, name FROM groups WHERE code = ?", (code.strip(),)
+        ).fetchone()
+        if not group:
+            raise HTTPException(404, "no group with that code")
+        placeholders = ", ".join("?" * len(MEMBER_EVENTS))
+        rows = conn.execute(
+            "SELECT id, event_id, type, payload, author FROM events"
+            f" WHERE group_id = ? AND type IN ({placeholders}) ORDER BY id",
+            (group["id"], *MEMBER_EVENTS),
+        ).fetchall()
+        joined = conn.execute(
+            "SELECT 1 FROM memberships WHERE group_id = ? AND user_id = ?",
+            (group["id"], user["id"]),
+        ).fetchone()
+    events = []
+    for r in rows:
+        e = dict(r)
+        e["payload"] = json.loads(e["payload"])
+        events.append(e)
+    # `joined` spares the client offering a claim it would only have to refuse:
+    # someone already in the group goes straight there instead.
+    return {
+        "id": group["id"],
+        "name": group["name"],
+        "events": events,
+        "joined": joined is not None,
+    }
 
 
 @router.get("/api/groups/{group_id}")

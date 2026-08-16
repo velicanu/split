@@ -157,17 +157,68 @@ still connected, so their next sync silently makes them somebody else. Ghosting
 first severs the feed at a clean point, which is exactly why the fork is
 comprehensible.
 
-## Invites name a member
+## Two kinds of link
 
-An invite link says *who to become*: `#join=<code>&gk=<key>&as=<member_id>`.
-Accepting it joins the group and claims that member in one act, so there is no
-window in which someone else could claim the ghost first, and nobody has to
-remember to do it afterwards.
+A group has two ways in. They differ by one field.
 
-Hitting **invite** always produces a member to become. If you are inviting
-someone already in the split, it is their existing ghost; otherwise a ghost is
-created for them there and then, which means the group can split with them
-before they ever accept.
+**A group link** — `#join=<code>&gk=<key>` — names nobody. It is the same link
+every time, it does not expire, and it is for pasting where a group of people
+already talk. Whoever opens it is asked who they are before anything is
+written; see *Choosing who you are* below.
+
+**A member link** — `#join=<code>&gk=<key>&as=<member_id>` — says *who to
+become*. Accepting it joins the group and claims that member in one act, so
+there is no window in which someone else could claim the ghost first, and
+nobody has to remember to do it afterwards. It is meant for one named person,
+and a member can only be claimed once, so it works once.
+
+Inviting a specific person always produces a member to become. If you are
+inviting someone already in the split, it is their existing ghost; otherwise a
+ghost is created for them there and then, which means the group can split with
+them before they ever accept.
+
+Both carry the group key in the fragment, so both are exactly as sensitive as
+the group itself. The group link is the more dangerous of the two only because
+it is *meant* to be pasted somewhere with an audience.
+
+### Why not one link
+
+An earlier version had only the member link, on the reasoning that a claim is
+too important to leave to the person claiming. It turned the ordinary case —
+*here is the flat group, everyone join* — into one hand-minted link per person,
+which is not a thing anyone does in a group chat. The version before that had
+only the group link, and left claiming to a `member.merged` event somebody had
+to remember to write afterwards, which is the coordination problem this design
+exists to remove.
+
+Both links keep claiming inside the join. They differ only in who makes the
+choice: the inviter, or the joiner.
+
+## Choosing who you are
+
+A group link names nobody, so the person opening it makes the choice the
+inviter would otherwise have made — take over a member the group has been
+splitting with, or arrive as somebody new.
+
+That choice has to be made *before* the join, because claiming is part of the
+join and there is no second chance at it. So the joiner has to see the ghost
+names, and those are encrypted: the server cannot offer the list itself.
+
+`GET /api/groups/preview?code=<code>` is what closes that. It returns the
+member events, and only the member events, to anyone holding the join code; the
+client decrypts them with the key from the link's fragment and folds them into
+the same member list the group itself sees.
+
+This gives away nothing that joining would not. The join code *is* the write
+capability: whoever holds it can join and then read the whole feed. What keeps
+it narrow is that it is both scoped and attributable — only `member.*` comes
+back, so the code buys *who is in the split* rather than what they spent, and an
+account is required, so a guessed code is not an anonymous window onto a group.
+
+Only members with nobody attached are offered, which the fold already works out:
+a claimed member is not a separate person in it. Someone who is already in the
+group is sent straight there instead of being asked, because there is nothing
+they could usefully answer — see below.
 
 ## Claiming a ghost
 
@@ -213,9 +264,18 @@ it is not mistaken for free.
 
 ### What claiming once means
 
-The first join naming a member id wins; a link used twice is invalid for the
-second person. Otherwise they would silently displace the first, who would be
-left a member with no history and no indication why.
+The first join naming a member id wins; a *member* link used twice is invalid
+for the second person. Otherwise they would silently displace the first, who
+would be left a member with no history and no indication why. A group link is
+not used up by this — it names nobody, so there is nothing for a second opener
+to find taken, only a shorter list to choose from.
+
+A claim from somebody **already in the group** is refused outright (409) rather
+than dropped. Claiming happens at the instant of joining and nowhere else, so a
+claim from an existing member has no instant to happen at; letting the call
+succeed anyway would tell them they had taken over a ghost and then show them
+none of its history. Reachable in practice now that one link can be opened
+twice — a second tab, or the back button.
 
 Recovery chains still work (`2 → 3`, then `3 → 4`): a claim *target* is not
 itself a claimed id, so being ghosted and re-invited a second time is fine.
@@ -228,10 +288,14 @@ clear — and the fact that you are publicly asserting you are that person.
 
 ### No corrective path
 
-If someone joins on a plain link and should have taken over a ghost, there is
+If someone joins as a new person and should have taken over a ghost, there is
 no merge button to fix it afterwards. The fix is to ghost them and re-invite
-with the right link. Clunkier, but it is the same path recovery already uses,
+with a member link. Clunkier, but it is the same path recovery already uses,
 and one mechanism that is occasionally awkward beats two that overlap.
+
+Being asked the question up front (*Choosing who you are*) makes the wrong
+answer rarer without making it impossible — somebody will still tap past it.
+Rarer is worth having; it is not a reason to add the second mechanism back.
 
 ## Events
 

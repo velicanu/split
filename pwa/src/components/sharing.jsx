@@ -132,20 +132,66 @@ export function ShareReadOnly({ groupId, code }) {
   )
 }
 
+// A link to hand out, with the one control it ever needs. Shared by the two
+// kinds of invite below, which differ in what they say rather than how they
+// behave.
+function CopyLink({ link }) {
+  const [copied, setCopied] = useState(false)
+  // A freshly-built link has not been copied, whatever the last one's state was
+  // — otherwise picking a second person leaves "copied" under an uncopied link.
+  useEffect(() => setCopied(false), [link])
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <>
+      <input
+        className="invite"
+        readOnly
+        value={link}
+        onFocus={(e) => e.target.select()}
+      />
+      <button className="link" onClick={copy}>
+        {copied ? 'copied' : 'copy'}
+      </button>
+    </>
+  )
+}
+
 export function InviteLink({ groupId, code, members, onAddGhost }) {
+  const [groupLink, setGroupLink] = useState('')
   const [link, setLink] = useState('')
   const [forMember, setForMember] = useState(null)
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
-  const [copied, setCopied] = useState(false)
   const [error, setError] = useState('')
+
+  // The group link names nobody, so it is the same link every time and can be
+  // built on sight — there is nothing to create and nothing to revoke.
+  useEffect(() => {
+    let cancelled = false
+    groupKey(groupId).then((key) => {
+      if (key && !cancelled) {
+        setGroupLink(buildInviteLink(window.location.origin, code, key))
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [groupId, code])
 
   const show = async (memberId, label) => {
     const key = await groupKey(groupId)
     if (!key) return
     setForMember(label)
     setLink(buildInviteLink(window.location.origin, code, key, memberId))
-    setCopied(false)
   }
 
   async function inviteSomeoneNew(e) {
@@ -166,64 +212,67 @@ export function InviteLink({ groupId, code, members, onAddGhost }) {
     }
   }
 
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(link)
-      setCopied(true)
-    } catch {
-      setCopied(false)
-    }
-  }
-
   const ghosts = (members ?? []).filter((m) => m.ghost)
 
   return (
     <div>
-      <form onSubmit={inviteSomeoneNew}>
-        <h4>Invite someone</h4>
-        <input
-          placeholder="their name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <button type="submit" disabled={busy}>
-          {busy ? 'working…' : 'Create their invite'}
-        </button>
-        {error && <p className="error">{error}</p>}
-      </form>
-
-      {ghosts.length > 0 && (
-        <p className="muted">
-          Or invite someone already in the split:{' '}
-          {ghosts.map((m) => (
-            <button
-              key={m.id}
-              className="link"
-              onClick={() => show(m.id, m.display_name)}
-            >
-              {m.display_name}
-            </button>
-          ))}
-        </p>
-      )}
-
-      {link && (
-        <div>
+      {groupLink && (
+        <div className="group-link">
+          <h4>Group link</h4>
           <p className="muted">
-            This link makes whoever opens it <strong>{forMember}</strong>, and
-            hands over the group key. It works once. Send it somewhere private.
+            One link for everyone — paste it into the group chat. Whoever opens
+            it says who they are: someone already in the split, or someone new.
+            It doesn&rsquo;t expire, and it carries the group key, so treat it
+            as the group itself.
           </p>
-          <input
-            className="invite"
-            readOnly
-            value={link}
-            onFocus={(e) => e.target.select()}
-          />
-          <button className="link" onClick={copy}>
-            {copied ? 'copied' : 'copy'}
-          </button>
+          <CopyLink link={groupLink} />
         </div>
       )}
+
+      <div className="member-invite">
+        <form onSubmit={inviteSomeoneNew}>
+          <h4>Invite one person</h4>
+          <p className="muted">
+            A link for one named person, so they arrive as themselves without
+            being asked. Use it when you know who is coming.
+          </p>
+          <input
+            placeholder="their name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <button type="submit" disabled={busy}>
+            {busy ? 'working…' : 'Create their invite'}
+          </button>
+          {error && <p className="error">{error}</p>}
+        </form>
+
+        {ghosts.length > 0 && (
+          <p className="muted">
+            Or invite someone already in the split:{' '}
+            {ghosts.map((m) => (
+              <button
+                key={m.id}
+                className="link"
+                onClick={() => show(m.id, m.display_name)}
+              >
+                {m.display_name}
+              </button>
+            ))}
+          </p>
+        )}
+
+        {link && (
+          <div>
+            <p className="muted">
+              This link makes whoever opens it <strong>{forMember}</strong>, and
+              hands over the group key. It works once. Send it somewhere
+              private.
+            </p>
+            <CopyLink link={link} />
+          </div>
+        )}
+      </div>
     </div>
   )
 }
