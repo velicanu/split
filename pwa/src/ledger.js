@@ -213,6 +213,52 @@ export function computeState(events) {
     return out
   }
 
+  // The name a claimed-away member was known by. The log keeps it — it is in
+  // `member.ghost_added` (or their old `member.added`) and nothing removes it —
+  // but resolving turns every reference into the claiming account, so without
+  // carrying it here the fold's own output is where it disappears.
+  const formerNameOf = new Map(
+    members
+      .filter((m) => claimedAway.has(m.id))
+      .map((m) => [m.id, m.display_name])
+  )
+
+  /** For a set of ids as *written*: resolved id -> the names it was written
+   *  under. Display only — these ids never reach a balance, which is why this
+   *  can look at the payload after mergeRows has collapsed it.
+   *
+   *  Sorted by the original id so every client builds the same list from the
+   *  same log, rather than inheriting the order rows happen to appear in. A
+   *  chain (-100 -> 5 -> 9) can put two names on one person, and both are true
+   *  of the row. */
+  const formerlyFor = (ids) => {
+    const out = {}
+    const named = [...new Set(ids)]
+      .filter((id) => formerNameOf.has(id))
+      .sort((a, b) => a - b)
+    for (const id of named) {
+      ;(out[resolve(id)] ||= []).push(formerNameOf.get(id))
+    }
+    return out
+  }
+
+  // Every member id an expense payload names, before any of it is resolved.
+  // The recipe counts: the detail view renders item claims from it, and a name
+  // that appeared on the split but not on the item it came from would read as
+  // two different people.
+  const idsNamedBy = (p) => {
+    const ids = []
+    for (const r of p.payers ?? []) ids.push(r.user_id)
+    for (const r of p.splits ?? []) ids.push(r.user_id)
+    const s = p.split
+    if (s) {
+      for (const id of s.participants ?? []) ids.push(id)
+      for (const it of s.items ?? []) ids.push(...(it.claimed_by ?? []))
+      for (const id of Object.keys(s.weights ?? {})) ids.push(Number(id))
+    }
+    return ids
+  }
+
   // Sum rather than overwrite: after a claim an expense can name both the ghost
   // and the account that claimed it, and that person owes the total of the two.
   const mergeRows = (rows, idKey, amountKey) => {
@@ -244,6 +290,11 @@ export function computeState(events) {
       // Ids of receipt images, never the images themselves — the log is
       // replicated to every client and must stay small.
       receipts: Array.isArray(p.receipts) ? p.receipts : [],
+      // resolved id -> the name(s) this row was actually written under, when
+      // that differs from who it now belongs to. Empty for everything written
+      // after the claim, which is the point: it marks the rows that predate it
+      // rather than relabelling the person everywhere. See plan/12.
+      formerly: formerlyFor(idsNamedBy(p)),
       // Soft delete: the row stays in the log with its data intact so it can
       // be shown struck-through and restored; it just stops counting.
       deleted: !!p.deleted,
@@ -284,6 +335,9 @@ export function computeState(events) {
     amount_cents: ev.payload.amount_cents,
     date: ev.payload.date || '',
     deleted: !!ev.payload.deleted,
+    // As on an expense: who this payment was recorded between, when that is
+    // not who it now reads as.
+    formerly: formerlyFor([ev.payload.from, ev.payload.to]),
   }))
   // A payment moves money: the payer's net rises, the receiver's falls.
   for (const s of settlements) {
