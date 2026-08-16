@@ -14,7 +14,7 @@ import { acceptInvite } from '../join'
 import { loadOverviews, netLabel, totalNet } from '../overview'
 import { localGroups, setMeta as setLocalMeta } from '../store'
 
-export function GroupList({ me, onOpen, onNewBill }) {
+export function GroupList({ me, onOpen, onNewBill, onChooseIdentity }) {
   const [overviews, setOverviews] = useState(null)
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
@@ -58,6 +58,14 @@ export function GroupList({ me, onOpen, onNewBill }) {
     const invite = parseInvite(code.trim())
     if (!invite) {
       return setError('Paste the whole invite link — it carries the group key')
+    }
+    // A group link names nobody, so it cannot just be accepted: whoever pastes
+    // it has to say who they are first, exactly as if they had opened it. A
+    // link that already names a member is the accept-and-claim case and needs
+    // no question. See JoinGroup and plan/12.
+    if (invite.member_id === null && onChooseIdentity) {
+      setCode('')
+      return onChooseIdentity(invite)
     }
     try {
       const g = await acceptInvite(invite)

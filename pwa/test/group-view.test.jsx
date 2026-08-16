@@ -17,6 +17,7 @@ import {
   sealTo,
 } from '../src/crypto.js'
 import { forgetGroupKeys } from '../src/groupkeys.js'
+import { parseInvite } from '../src/invite.js'
 import { forgetLocalLedger, saveDeviceKey } from '../src/store.js'
 import { forgetReceipts } from '../src/receipts.js'
 import {
@@ -687,7 +688,31 @@ describe('someone not using the app', () => {
 })
 
 describe('inviting someone', () => {
-  const inviteForm = () => byText('h4', 'Invite someone')?.closest('form')
+  const inviteForm = () => byText('h4', 'Invite one person')?.closest('form')
+  // Scoped: the sheet also carries the group link, which names nobody and is
+  // built on sight, so a bare '.invite' would match that one first.
+  const memberLink = () => $('.member-invite .invite')
+
+  test('the group link names nobody, so one link does for everybody', async () => {
+    // The paste-into-the-group-chat link. It creates no ghost and expires
+    // never, which is exactly what makes it reusable — the person opening it
+    // says who they are instead (JoinGroup). See plan/12.
+    const api = await fakeApi()
+    await open()
+    await openMenu()
+
+    const link = $('.group-link .invite').value
+    assert.deepEqual(parseInvite(link), {
+      code: 'abc',
+      gk: api.key,
+      member_id: null,
+    })
+    assert.equal(
+      api.posted.filter((e) => e.type === 'member.ghost_added').length,
+      0,
+      'nobody was invented to make the link'
+    )
+  })
 
   test('creates a ghost and a link that names them', async () => {
     const api = await fakeApi()
@@ -703,7 +728,7 @@ describe('inviting someone', () => {
     assert.ok(ghost)
     assert.equal(ghost.payload.display_name, 'Fran')
 
-    const link = $('.invite').value
+    const link = memberLink().value
     assert.ok(link.includes('#join='), 'carries the group')
     assert.ok(link.includes('gk='), 'carries the key')
     assert.ok(
@@ -729,7 +754,7 @@ describe('inviting someone', () => {
     assert.equal(after, before, 'no duplicate ghost was created')
     const ghostId = api.posted.find((e) => e.type === 'member.ghost_added')
       .payload.member_id
-    assert.ok($('.invite').value.includes(`as=${encodeURIComponent(ghostId)}`))
+    assert.ok(memberLink().value.includes(`as=${encodeURIComponent(ghostId)}`))
   })
 
   test('refuses a nameless invite before creating anything', async () => {
@@ -739,7 +764,7 @@ describe('inviting someone', () => {
     await submit(inviteForm())
     assert.ok(text().includes('Give them a name'))
     assert.equal(api.posted.filter((e) => e.type === 'member.ghost_added').length, 0)
-    assert.equal($('.invite'), null)
+    assert.equal(memberLink(), null)
   })
 })
 

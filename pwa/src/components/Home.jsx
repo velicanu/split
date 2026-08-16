@@ -13,6 +13,7 @@ import { Activity } from './Activity'
 import { Settings } from './Settings'
 import { GroupList } from './GroupList'
 import { GroupView } from './GroupView'
+import { JoinGroup } from './JoinGroup'
 import { BillCreate } from './BillCreate'
 import { PairOldDevice } from './PairOldDevice'
 
@@ -30,6 +31,12 @@ export function Home({ user, onLogout }) {
   // once, because the invite key is cleared from the address bar below.
   const openedAt = useState(() => window.location.hash)[0]
   const [pendingInvite] = useState(() => parseInvite(openedAt))
+  // A link that names a member is accepted on arrival; a group link names
+  // nobody, so it opens the chooser and the joiner says who they are first.
+  // Also set when a group link is pasted into the list rather than opened.
+  const [joining, setJoining] = useState(() =>
+    pendingInvite?.member_id === null ? pendingInvite : null
+  )
   // An invite takes over the fragment, so while one is pending there is no view
   // to restore — land on the list and let the invite move us.
   const [view, navigate] = useView(
@@ -70,6 +77,13 @@ export function Home({ user, onLogout }) {
 
   useEffect(() => {
     if (!pendingInvite) return
+    // A group link joins nobody by itself — the chooser is already up (see
+    // `joining`), so there is nothing to accept here. Drop the fragment and
+    // wait for the choice.
+    if (pendingInvite.member_id === null) {
+      navigate({ view: 'list' }, { replace: true })
+      return
+    }
     let cancelled = false
     ;(async () => {
       try {
@@ -94,6 +108,28 @@ export function Home({ user, onLogout }) {
     // in for whoever sits down next. Coming back needs the password.
     await signOut()
     onLogout()
+  }
+
+  // Stable, because JoinGroup fetches the member list in an effect keyed on its
+  // props: an inline arrow here would be a new function on every render of this
+  // component — and the AI settings landing is one — so the preview would be
+  // fetched again each time.
+  const joined = useCallback(
+    (id) => {
+      setJoining(null)
+      navigate({ view: 'group', id }, { replace: true })
+    },
+    [navigate]
+  )
+  const cancelJoin = useCallback(() => {
+    setJoining(null)
+    navigate({ view: 'list' }, { replace: true })
+  }, [navigate])
+
+  // A takeover screen, like the read-only and bill views: there is one question
+  // to answer and the dock would only offer ways to leave it half-done.
+  if (joining) {
+    return <JoinGroup invite={joining} onJoined={joined} onCancel={cancelJoin} />
   }
 
   return (
@@ -127,6 +163,7 @@ export function Home({ user, onLogout }) {
             me={user}
             onOpen={(id) => navigate({ view: 'group', id })}
             onNewBill={() => navigate({ view: 'newbill' })}
+            onChooseIdentity={setJoining}
           />
         )}
       </div>

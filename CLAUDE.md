@@ -67,6 +67,14 @@ appearing to restore a file it did not:
 
 `git add -A` before mutating, and confirm the tree is clean afterwards.
 
+A third way, found by a mutation that survived: in `server/test_main.py` the
+whole file shares one database, and **`event_id` is unique server-wide, not per
+group**. Two tests using `"e0"` means the second one gets a `200` with
+`duplicate: true` and stores nothing — so a test that thought it was seeding
+events was asserting against an empty group. Prefix event ids per test, and
+assert `not res.json().get("duplicate")` when the point of the test is that the
+event exists.
+
 ## Environment notes
 
 These are about the machines this gets developed on, not about the project.

@@ -777,6 +777,99 @@ def test_you_cannot_claim_yourself():
     assert res.status_code == 400
 
 
+def test_a_claim_from_someone_already_in_the_group_is_refused():
+    """Claiming happens at the moment of joining and nowhere else, so a claim
+    from an existing member has no moment to happen at. It used to be dropped
+    silently, which left them believing they had taken over a ghost."""
+    owner = signed_up("again-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    joiner = signed_up("again-joiner")
+    joiner.post("/api/groups/join", json={"code": group["code"]})
+
+    res = joiner.post("/api/groups/join", json={"code": group["code"], "claims": -100})
+    assert res.status_code == 409
+
+    added = [
+        e
+        for e in events_of(owner, group["id"])["events"]
+        if e["type"] == "member.added"
+    ]
+    assert all("claims" not in e["payload"] for e in added)
+
+
+def test_preview_serves_the_member_list_to_anyone_holding_the_join_code():
+    """A group link names nobody, so whoever opens it has to pick who they are
+    before joining — which needs the ghost names, which are encrypted. The join
+    code is already the write capability, so serving them costs nothing that
+    joining would not."""
+    owner = signed_up("pv-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    owner.post(
+        f"/api/groups/{gid}/events",
+        json={
+            "event_id": "e-ghost",
+            "type": "member.ghost_added",
+            "payload": {"enc": "sealed-name"},
+        },
+    )
+
+    stranger = signed_up("pv-stranger")
+    res = stranger.get(f"/api/groups/preview?code={group['code']}")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["id"] == gid
+    assert body["name"] == "Trip"
+    assert body["joined"] is False
+    assert [e["type"] for e in body["events"]] == ["member.added", "member.ghost_added"]
+
+
+def test_preview_hands_over_the_members_and_nothing_else():
+    """The narrow part of the bargain: the code buys who is in the split, not
+    what they spent. A member event is the only thing that comes back."""
+    owner = signed_up("pvo-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+    gid = group["id"]
+    for i, type_ in enumerate(
+        ["expense.created", "settlement.created", "comment.created"]
+    ):
+        # Both assertions matter, and a mutation pass is what proved it: with
+        # the type filter deleted this test still passed, because the events it
+        # thought it was writing were never stored. Event ids are unique
+        # server-wide rather than per group, so a plain "e0" collided with
+        # another test's and came back 200 "duplicate" having written nothing —
+        # leaving "nothing else came back" true for the wrong reason.
+        res = owner.post(
+            f"/api/groups/{gid}/events",
+            json={"event_id": f"pvo-{i}", "type": type_, "payload": {"enc": "sealed"}},
+        )
+        assert res.status_code == 200, res.text
+        assert not res.json().get("duplicate"), "the event has to actually be stored"
+
+    stranger = signed_up("pvo-stranger")
+    body = stranger.get(f"/api/groups/preview?code={group['code']}").json()
+    assert [e["type"] for e in body["events"]] == ["member.added"]
+
+
+def test_preview_says_when_you_are_already_in_the_group():
+    """So the client sends them to the group rather than offering a claim it
+    would have to refuse."""
+    owner = signed_up("pvj-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+
+    body = owner.get(f"/api/groups/preview?code={group['code']}").json()
+    assert body["joined"] is True
+
+
+def test_preview_needs_an_account_and_a_real_code():
+    owner = signed_up("pvn-owner")
+    group = owner.post("/api/groups", json={"name": "Trip"}).json()
+
+    assert owner.get("/api/groups/preview?code=nosuchcode").status_code == 404
+    # An account is required, so a guessed code is not an anonymous window.
+    assert client.get(f"/api/groups/preview?code={group['code']}").status_code == 401
+
+
 def test_hiding_a_group_removes_it_from_the_list_but_keeps_the_membership():
     """What revive does to the group it leaves behind. The row stays, so the
     frozen prefix and any receipts remain reachable — the decision about what
