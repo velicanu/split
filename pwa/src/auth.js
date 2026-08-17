@@ -143,8 +143,10 @@ export async function resume() {
     // from another device, or the server was reset out from under us. Either
     // way its cached ledger and group keys are orphaned, and leaving them lets
     // events from a previous life collide with a group that later reuses the
-    // same id (exactly what a dev-time wipe produces: they show up as
-    // undecryptable under the new group's key). Clear everything, as logout does.
+    // same id — they show up as undecryptable under the new group's key. Group
+    // ids are reusable in the ordinary run of things, because a group whose
+    // last member leaves is deleted outright (plan/12). Clear everything, as
+    // logout does.
     await forgetDeviceKey()
     await forgetSession()
     forgetGroupKeys()

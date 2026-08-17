@@ -34,7 +34,8 @@ Three levels, not two:
 
 **MLS (RFC 9420) was considered and rejected for now** — it is a lot of machinery for
 forward-secrecy guarantees we have not asked for. Hand-rolled group-key wrapping with libsodium
-instead. Honest caveat: switching to MLS later *would* be a migration, unlike today.
+instead. Honest caveat: switching to MLS later *would* be a migration — which was cheap to
+wave away when the schema reset on deploy, and is not now that there are live users.
 
 ## Sub-decisions
 

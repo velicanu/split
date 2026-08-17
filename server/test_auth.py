@@ -459,14 +459,18 @@ def test_removing_a_wrap_needs_a_session():
     assert client().delete("/api/wraps/recovery").status_code == 401
 
 
-def test_a_stale_database_is_wiped_rather_than_half_migrated():
-    """`CREATE TABLE IF NOT EXISTS` does nothing to an older table, so without
-    an explicit reset a deployed database keeps its old columns and the first
-    INSERT fails at runtime. That is what shipped with PR A."""
+def test_a_stale_database_is_refused_rather_than_dropped():
+    """There are live users now, so a schema bump must never be a data-loss
+    event. It must still be loud: `CREATE TABLE IF NOT EXISTS` does nothing to
+    an existing older table, so an unmigrated database keeps its old columns and
+    the first INSERT fails at runtime instead. That shipped once (PR A). The
+    failure belongs at startup, not in somebody's first request."""
     import sqlite3
     import tempfile as tf
 
-    from main import SCHEMA_VERSION, init_db, reset_if_stale
+    import pytest
+
+    from main import SCHEMA_VERSION, StaleSchema, check_schema_version, init_db
 
     path = os.path.join(tf.mkdtemp(), "old.db")
     conn = sqlite3.connect(path)
@@ -481,23 +485,45 @@ def test_a_stale_database_is_wiped_rather_than_half_migrated():
     conn.commit()
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
 
-    reset_if_stale(conn)
+    with pytest.raises(StaleSchema):
+        check_schema_version(conn)
     conn.commit()
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    remaining = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()
-    assert remaining == [], "the stale schema must be gone, not patched"
+    # The row is still there, and the version was not quietly moved on — a
+    # stamped version with unmigrated tables would be worse than either.
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
 
-    # And a second run is a no-op: matching version, nothing dropped.
+    assert init_db and SCHEMA_VERSION >= 2
+
+
+def test_an_empty_database_is_stamped_rather_than_refused():
+    """A new deployment has no tables to migrate, so it is not stale — refusing
+    here would mean the server could never start for the first time."""
+    import sqlite3
+    import tempfile as tf
+
+    from main import SCHEMA_VERSION, check_schema_version
+
+    conn = sqlite3.connect(os.path.join(tf.mkdtemp(), "new.db"))
+    check_schema_version(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_a_current_database_is_left_alone():
+    import sqlite3
+    import tempfile as tf
+
+    from main import SCHEMA_VERSION, check_schema_version
+
+    conn = sqlite3.connect(os.path.join(tf.mkdtemp(), "cur.db"))
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY)")
     conn.execute("INSERT INTO users (id) VALUES (1)")
     conn.commit()
-    reset_if_stale(conn)
-    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
 
-    assert init_db and SCHEMA_VERSION >= 2
+    check_schema_version(conn)
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
 
 
 def test_index_html_is_never_cached_but_hashed_assets_are():
@@ -528,12 +554,15 @@ def test_index_html_is_never_cached_but_hashed_assets_are():
     )
 
 
-def test_init_db_actually_rebuilds_a_stale_database():
-    """The reset only matters if init_db calls it. PR A shipped a schema the
+def test_init_db_refuses_to_start_on_an_unmigrated_database():
+    """The check only matters if init_db calls it. PR A shipped a schema the
     deployed database could not satisfy precisely because nothing wired the two
-    together, so this drives the whole path rather than the helper alone."""
+    together, so this drives the whole path rather than the helper alone — and
+    now asserts the data is still there afterwards."""
     import sqlite3
     import tempfile as tf
+
+    import pytest
 
     import db
     import main
@@ -554,20 +583,20 @@ def test_init_db_actually_rebuilds_a_stale_database():
     original = db.DB_PATH
     try:
         db.DB_PATH = path
-        main.init_db()
+        with pytest.raises(main.StaleSchema):
+            main.init_db()
     finally:
         db.DB_PATH = original
 
     conn = sqlite3.connect(path)
     columns = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
-    assert "login_handle" in columns, "init_db must rebuild, not leave the old table"
-    assert "pw_hash" not in columns
-    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-    # And the tables PR A added are actually there to insert into.
+    assert "pw_hash" in columns, "the old table must be left exactly as it was"
+    assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+    # And it did not get half-way: no new tables alongside the old ones.
     tables = {
         r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
-    assert {"devices", "key_wraps", "challenges"} <= tables
+    assert not {"devices", "key_wraps", "challenges"} & tables
 
 
 def test_group_keys_reach_only_their_recipient():

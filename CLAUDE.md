@@ -1,8 +1,21 @@
 # Split — development notes
 
-While in the pure development stage, prefer simple where possible. If a decision
-can be made later, defer it to later unless it's actually needed now. Rewriting
-is cheaper than overengineering the wrong patterns too early.
+Prefer simple where possible. If a decision can be made later, defer it to
+later unless it's actually needed now. Rewriting is cheaper than overengineering
+the wrong patterns too early.
+
+**There are live users.** That does not change the taste above — it changes what
+is disposable. Code and interfaces still are. **Data is not.** A schema change
+needs a migration that carries the data across; `check_schema_version` refuses to
+start on an unmigrated database rather than dropping it, and there is no path
+that deletes user data to make a deploy go through. Anything written before this
+that says data resets on deploy is out of date, not a policy you can follow.
+
+The consequence is worth knowing before you bump `SCHEMA_VERSION`: `deploy.sh`
+runs from a timer, so an unmigrated deploy leaves the container failing to start
+and the service down until a migration lands. That is the intended trade — an
+outage is recoverable and a dropped ledger is not — but it means the migration
+ships *with* the schema change, not after it.
 
 ## Running things
 

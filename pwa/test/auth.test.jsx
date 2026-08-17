@@ -323,7 +323,7 @@ describe('resuming on a device that already has a key', () => {
 
   test('a rejected device clears its orphaned local ledger', async () => {
     // The reported bug: offline-first caches the ledger by group id. A server
-    // wipe (a dev-time schema bump) resets the DB, reuses group ids, and the
+    // wipe (the server losing this device) reuses group ids, and the
     // old events — under the old key — then surface as undecryptable under the
     // new group. A rejected device means the server is gone from under us, so
     // its cache is orphaned and must go.
@@ -334,7 +334,7 @@ describe('resuming on a device that already has a key', () => {
     assert.equal((await localEvents(1)).length, 1, 'the setup cached something')
 
     const device = await loadDeviceKey()
-    delete server.devices[device.pubkey] // the wipe/revoke
+    delete server.devices[device.pubkey] // the server forgetting this device
 
     assert.equal(await resume(), null)
     assert.deepEqual(await localEvents(1), [], 'the stale ledger is gone')

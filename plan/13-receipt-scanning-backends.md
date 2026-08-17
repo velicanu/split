@@ -199,8 +199,10 @@ Not additive — the direct-provider path is deleted, not left as a fallback:
   (`ai/providers/{provider}/…`, the provider/model settings) collapse to a
   single scanner config per account.
 
-WIP data is disposable and the schema resets on deploy, so this is a straight
-removal with no migration.
+Written when the schema reset on deploy, which made this a straight removal.
+It is not any more: dropping the per-provider columns needs a migration that
+carries existing scanner settings across, or a decision to leave the columns in
+place unread. Cheaper to decide when this is actually built than now.
 
 ## Deliberately not doing
 
