@@ -9,7 +9,7 @@ import bills
 import groups
 import pairings
 import receipts
-from db import DB_PATH, SCHEMA_VERSION, init_db, reset_if_stale
+from db import DB_PATH, SCHEMA_VERSION, StaleSchema, check_schema_version, init_db
 from groups import split_equally
 
 # Re-exported for the test suite, which imports them from `main`.
@@ -18,7 +18,8 @@ __all__ = [
     "DB_PATH",
     "SCHEMA_VERSION",
     "init_db",
-    "reset_if_stale",
+    "StaleSchema",
+    "check_schema_version",
     "split_equally",
 ]
 

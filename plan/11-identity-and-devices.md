@@ -155,6 +155,7 @@ One PR at a time; each leaves a working app.
 
 Passkey-PRF wraps slot in additively at any point via `key_wraps.method`.
 
-**All existing data is dropped** at PR A. This is deliberate and is why now is the cheap moment —
-the no-migration-during-development policy is still in force, and it stops being true the day it
-is not.
+**All existing data was dropped** at PR A. That was deliberate, and it was the cheap moment:
+the no-migration-during-development policy was still in force then. **It is not any more** —
+there are live users, and a schema change now needs a migration. Kept here as the record of what
+PR A did, not as something repeatable.

@@ -25,8 +25,8 @@ def db():
       committed (via `with conn`), never closed, so every request leaked a
       connection object until GC reclaimed it.
 
-    `init_db` deliberately does NOT use this — its table drops must run with FK
-    off (see there)."""
+    `init_db` deliberately does NOT use this — its DDL runs with FK off (see
+    there)."""
     conn = connect()
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
@@ -37,42 +37,56 @@ def db():
         conn.close()
 
 
-# Bump whenever the schema changes shape. See reset_if_stale below: while we
-# are still in development this triggers a wipe, not a migration.
+# Bump whenever the schema changes shape — and write the migration that carries
+# the data across, because nothing here will do it for you any more. See
+# check_schema_version.
 SCHEMA_VERSION = 12
 
 
-def reset_if_stale(conn):
-    """Drop everything when the schema version moves.
+class StaleSchema(RuntimeError):
+    """A database the running code cannot safely use, and must not overwrite."""
 
-    No migrations until development is finished — WIP data is disposable. The
-    catch is that `CREATE TABLE IF NOT EXISTS` silently does nothing against an
-    older table, so without this a deployed database keeps its old columns and
-    the first INSERT fails at runtime. That is exactly what happened when
-    PR A shipped: the release notes said the data was dropped, but nothing
-    dropped it.
 
-    DESTRUCTIVE, and deliberately so. Remove this before there is data anyone
-    cares about, and write real migrations instead.
+def check_schema_version(conn):
+    """Refuse to run against a database whose schema version is not ours.
+
+    This used to drop every table. That was the right trade while the only data
+    was work-in-progress, and it is exactly the wrong one now that people have
+    accounts, groups and ledgers here — the server holds the only copy of an
+    event log that clients replicate but do not own. A schema bump must never
+    again be a data-loss event.
+
+    What it still has to do is fail *loudly*. `CREATE TABLE IF NOT EXISTS` does
+    nothing to an existing older table, so an unmigrated database keeps its old
+    columns and the first INSERT fails at runtime, a long way from the cause.
+    That shipped once (PR A). Refusing to start moves the failure to the deploy,
+    where somebody is watching.
+
+    A database with no tables is not stale, it is new: stamp it and carry on.
     """
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != SCHEMA_VERSION:
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master"
-            " WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        for (name,) in tables:
-            conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+    if version == SCHEMA_VERSION:
+        return
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    if not tables:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
+    raise StaleSchema(
+        f"database is at schema version {version}, this code expects "
+        f"{SCHEMA_VERSION}. Migrate it and set PRAGMA user_version = "
+        f"{SCHEMA_VERSION}. Data is no longer dropped to resolve this."
+    )
 
 
 def init_db():
-    # DDL runs with foreign keys OFF (SQLite's default via connect(), not db()):
-    # reset_if_stale drops every table, and dropping a parent while a child still
-    # references it raises under FK enforcement. Runtime queries use db(), which
-    # turns FK on.
+    # DDL runs with foreign keys OFF (SQLite's default via connect(), not db()),
+    # so table creation order never has to match dependency order. Runtime
+    # queries use db(), which turns FK on.
     with connect() as conn:
-        reset_if_stale(conn)
+        check_schema_version(conn)
         # No password material here at all. The server authenticates a signature
         # from a registered device key, so it holds nothing that could be used
         # to impersonate a user or decrypt their data.

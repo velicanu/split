@@ -155,8 +155,11 @@ export function computeState(events) {
     } else if (e.type === 'expense.created' || e.type === 'expense.updated') {
       const p = e.payload
       // A well-formed expense carries a stable id, its payers, and its splits.
-      // Rows from older models (single paid_by, no expense_id) are ignored —
-      // WIP data is disposable, no backfill.
+      // Rows from older models (single paid_by, no expense_id) are skipped
+      // rather than guessed at: the shapes predate any live user, so there is
+      // nothing of anyone's to lose here. A *new* payload shape does not get
+      // the same treatment — the log is append-only and every client must keep
+      // folding what is already in it.
       if (!p || !p.expense_id) continue
       if (!Array.isArray(p.payers) || !Array.isArray(p.splits)) continue
       const prev = latest[p.expense_id]
